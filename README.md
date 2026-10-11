@@ -26,14 +26,22 @@
 
 ## 🏛️ Live Greek Dictionary Demonstration
 
-The animation below shows NOTHOS searching the Ancient Greek
-LSJ dictionary for Greek terms and retrieving related lexical entries.
+The animation below demonstrates NOTHOS searching the Ancient Greek LSJ dictionary, prioritizing exact lemmas, cross-references, and semantic matches.
 
 <p align="center">
-  <img src="assets/demo/nothos-dictionary.gif"
-       alt="NOTHOS animated Ancient Greek dictionary search"
-       width="100%">
+  <img src="assets/medusa.png" alt="NOTHOS Medusa" width="240">
 </p>
+
+<p align="center">
+  <img src="assets/demo/nothos-dictionary-fast.gif" alt="NOTHOS Medusa CLI dictionary demonstration" width="100%">
+</p>
+
+### Try the dictionary
+
+```bash
+nothos research "Ἑρμῆς" --no-ai --top-k 5
+nothos research "μυστήριον" --no-ai --top-k 5
+```
 
 ### Try the dictionary
 
