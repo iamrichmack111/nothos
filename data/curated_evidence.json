@@ -1,0 +1,67 @@
+[
+  {
+    "id": "hermes_invents_lyre",
+    "entity_id": "hermes",
+    "title": "Hermes invents the tortoise-shell lyre",
+    "summary": "In the Homeric Hymn to Hermes, Hermes encounters a tortoise, makes a lyre from its shell, and plays it. This is a source-located narrative summary, not a direct quotation.",
+    "source": "Homeric Hymn to Hermes 24–61",
+    "tags": [
+      "Hermes",
+      "lyre",
+      "Apollo"
+    ]
+  },
+  {
+    "id": "hermes_apollo_exchange",
+    "entity_id": "apollo",
+    "title": "Hermes gives Apollo the lyre in the cattle dispute",
+    "summary": "In the Homeric Hymn to Hermes, Apollo is delighted by the lyre, and Hermes transfers the instrument to him as part of the reconciliation and exchange involving Apollo’s cattle. This is a source-located summary, not a quotation.",
+    "source": "Homeric Hymn to Hermes 418–502",
+    "tags": [
+      "Hermes",
+      "Apollo",
+      "lyre",
+      "cattle"
+    ]
+  },
+  {
+    "id": "pan_syrinx",
+    "entity_id": "pan",
+    "title": "Pan plays the syrinx (reed pipes); no lyre use established here",
+    "summary": "The Homeric Hymn to Pan depicts Pan making music with reed pipes (syrinx). This evidence does not establish lyre playing by Pan; it does not explicitly deny that Pan ever played a lyre. In Ovid’s later Latin account, Syrinx becomes reeds that Pan uses for his pipes. The syrinx is a wind instrument, distinct from the stringed lyre. These are source-located summaries, not collated quotations.",
+    "source": "Homeric Hymn to Pan 14–27; Ovid, Metamorphoses 1.689–712 (Latin variant)",
+    "tags": [
+      "Pan",
+      "syrinx",
+      "panpipes",
+      "lyre",
+      "Hermes",
+      "Apollo"
+    ]
+  },
+  {
+    "id": "pan_parentage",
+    "entity_id": "pan",
+    "title": "Pan son of Hermes in one tradition",
+    "summary": "The Homeric Hymn to Pan names Hermes as Pan’s father; other ancient traditions give different parentage. This relationship is tradition-specific, not universal.",
+    "source": "Homeric Hymn to Pan 28–47",
+    "tags": [
+      "Pan",
+      "Hermes",
+      "father",
+      "parentage"
+    ]
+  },
+  {
+    "id": "orpheus_sirens",
+    "entity_id": "sirens",
+    "title": "Orpheus counters Sirens with his music",
+    "summary": "In Apollonius, Orpheus plays his lyre to overcome the Sirens’ singing during the Argonauts’ voyage. This does not establish that the Sirens themselves played lyres.",
+    "source": "Apollonius Rhodius, Argonautica 4.891–919",
+    "tags": [
+      "Sirens",
+      "Orpheus",
+      "lyre"
+    ]
+  }
+]

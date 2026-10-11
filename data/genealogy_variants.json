@@ -1,0 +1,26 @@
+[
+  {
+    "child": "Pan",
+    "father": "Hermes",
+    "mother": "unnamed daughter of Dryops",
+    "source": "Homeric Hymn to Pan 28–47",
+    "verification": "source_locator_provided_text_not_independently_collated",
+    "note": "The hymn describes the mother as a daughter of Dryops; do not infer the name Penelope."
+  },
+  {
+    "child": "Pan",
+    "father": "Hermes",
+    "mother": "Penelope",
+    "source": "Herodotus, Histories 2.145",
+    "verification": "reference_locator_unverified",
+    "note": "Herodotus reports the Hermes/Penelope genealogy; exact passage and identification of Penelope should be collated."
+  },
+  {
+    "child": "Pan",
+    "father": "not specified in this record",
+    "mother": "Penelope",
+    "source": "Pseudo-Apollodorus, Epitome 7.38",
+    "verification": "reference_locator_unverified",
+    "note": "Verify wording and variant attribution against the Greek before relying on this record."
+  }
+]

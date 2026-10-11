@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "images": [],
+  "required_fields": [
+    "image_id",
+    "local_path",
+    "source_url",
+    "holding_institution",
+    "object_id",
+    "creator",
+    "date_range",
+    "material",
+    "depicted_entities",
+    "depicted_symbols",
+    "license",
+    "license_verified",
+    "description",
+    "caption_source",
+    "evidence_class",
+    "image_sha256"
+  ],
+  "note": "Earlier chat image carousels are visual references, NOT licensed image files. No images bundled. Add actual sourced objects only after checking rights."
+}
