@@ -1,15 +1,24 @@
 Output assets/demo/nothos-dictionary.gif
 
-Set FontSize 18
-Set Width 1200
-Set Height 720
+Set Shell "bash"
+Set FontSize 16
+Set Width 1500
+Set Height 1000
 Set Theme "Dracula"
-Set TypingSpeed 60ms
+Set TypingSpeed 35ms
 
-Type "nothos research 'μυστήριον' --no-ai --top-k 5 --banner none"
+Type "clear"
 Enter
-Sleep 6s
+Sleep 1s
 
-Type "nothos research 'Ἑρμῆς' --no-ai --top-k 5 --banner none"
+Type ".venv/bin/nothos banner"
 Enter
-Sleep 6s
+Sleep 5s
+
+Type ".venv/bin/nothos research 'μυστήριον' --no-ai --top-k 5 --banner none"
+Enter
+Sleep 30s
+
+Type ".venv/bin/nothos research 'Ἑρμῆς' --no-ai --top-k 5 --banner none"
+Enter
+Sleep 30s

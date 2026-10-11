@@ -1,39 +1,6 @@
 # NOTHOS v6 — Medusa Edition
 
-<!-- NOTHOS_DEMO_START -->
 
-## 🏛️ Ancient Greek Dictionary — Live Demonstration
-
-Watch NOTHOS perform semantic searches against the
-Ancient Greek LSJ dictionary.
-
-![NOTHOS Greek Dictionary Demonstration](assets/demo/nothos-dictionary.gif)
-
-### Try it yourself
-
-    nothos research "μυστήριον" --no-ai --top-k 5
-
-    nothos research "Ἑρμῆς" --no-ai --top-k 5
-
-NOTHOS supports:
-
-- Ancient Greek Unicode queries
-- LSJ dictionary retrieval
-- Semantic similarity search
-- Local embedding models
-- JSON, Markdown, HTML, and text exports
-- Command-line and REST API access
-
-### Vector search architecture
-
-NOTHOS currently uses SQLite-backed embeddings for semantic
-dictionary retrieval.
-
-A portable FAISS index is planned as an optional accelerated
-retrieval backend. FAISS is not required for the existing
-SQLite search functionality.
-
-<!-- NOTHOS_DEMO_END -->
 
 
 <!-- NOTHOS_BADGES_START -->
@@ -46,6 +13,47 @@ SQLite search functionality.
 ![License](https://img.shields.io/badge/license-not%20declared-lightgrey)
 
 <!-- NOTHOS_BADGES_END -->
+
+<!-- NOTHOS_VISUALS_START -->
+
+<p align="center">
+  <img src="assets/medusa.png" alt="NOTHOS Medusa" width="360">
+</p>
+
+<p align="center">
+  <strong>Ancient Greek Philology • Mythology • Semantic Search • Local AI</strong>
+</p>
+
+## 🏛️ Live Greek Dictionary Demonstration
+
+The animation below shows NOTHOS searching the Ancient Greek
+LSJ dictionary for Greek terms and retrieving related lexical entries.
+
+<p align="center">
+  <img src="assets/demo/nothos-dictionary.gif"
+       alt="NOTHOS animated Ancient Greek dictionary search"
+       width="100%">
+</p>
+
+### Try the dictionary
+
+    nothos research "μυστήριον" --no-ai --top-k 5
+
+    nothos research "Ἑρμῆς" --no-ai --top-k 5
+
+### Portable semantic search
+
+NOTHOS currently uses SQLite-backed embeddings for semantic retrieval.
+
+A portable FAISS index is planned as an optional search backend.
+A prebuilt FAISS index can be distributed alongside the LSJ
+dictionary and embedding-model configuration, allowing users
+to avoid rebuilding the dictionary embeddings.
+
+The same compatible embedding model is still needed to generate
+vectors for new search queries.
+
+<!-- NOTHOS_VISUALS_END -->
 
 Ancient Greek philology, mythology, semantic search, and evidence-aware
 research powered by LSJ dictionaries and local Ollama models.
