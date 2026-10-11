@@ -1,5 +1,41 @@
 # NOTHOS v6 — Medusa Edition
 
+<!-- NOTHOS_DEMO_START -->
+
+## 🏛️ Ancient Greek Dictionary — Live Demonstration
+
+Watch NOTHOS perform semantic searches against the
+Ancient Greek LSJ dictionary.
+
+![NOTHOS Greek Dictionary Demonstration](assets/demo/nothos-dictionary.gif)
+
+### Try it yourself
+
+    nothos research "μυστήριον" --no-ai --top-k 5
+
+    nothos research "Ἑρμῆς" --no-ai --top-k 5
+
+NOTHOS supports:
+
+- Ancient Greek Unicode queries
+- LSJ dictionary retrieval
+- Semantic similarity search
+- Local embedding models
+- JSON, Markdown, HTML, and text exports
+- Command-line and REST API access
+
+### Vector search architecture
+
+NOTHOS currently uses SQLite-backed embeddings for semantic
+dictionary retrieval.
+
+A portable FAISS index is planned as an optional accelerated
+retrieval backend. FAISS is not required for the existing
+SQLite search functionality.
+
+<!-- NOTHOS_DEMO_END -->
+
+
 <!-- NOTHOS_BADGES_START -->
 
 [![Python CI](https://github.com/iamrichmack111/nothos/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iamrichmack111/nothos/actions/workflows/ci.yml)
