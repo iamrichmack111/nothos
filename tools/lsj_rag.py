@@ -4,6 +4,7 @@ import argparse
 import os
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -31,9 +32,224 @@ EXPLAIN_MODEL = os.getenv(
 )
 
 
-def retrieve(query, top_k=8):
-    """Read existing embeddings without modifying the database."""
 
+LEXICON_DB = ROOT / "data/dictionaries/lsj.sqlite3"
+
+
+def normalize_greek_lemma(value):
+    """Normalize Greek spelling for accent-insensitive comparison."""
+    value = unicodedata.normalize("NFD", str(value)).casefold()
+    value = "".join(
+        char for char in value
+        if unicodedata.category(char) != "Mn"
+    )
+    return unicodedata.normalize("NFC", value).replace("ς", "σ")
+
+
+def retrieve_exact(query, top_k=8):
+    """Read Greek headwords from the LSJ dictionary without modifying it."""
+    normalized_query = normalize_greek_lemma(query)
+    results = []
+
+    con = sqlite3.connect(
+        f"file:{LEXICON_DB.resolve()}?mode=ro",
+        uri=True,
+        timeout=30,
+    )
+
+    try:
+        rows = con.execute(
+            """
+            SELECT greek_lemma, definition
+            FROM entries
+            WHERE greek_lemma IS NOT NULL
+              AND greek_lemma != ''
+            """
+        )
+
+        for lemma, definition in rows:
+            if lemma == query:
+                match_type = "EXACT"
+                score = 1.0
+            elif normalize_greek_lemma(lemma) == normalized_query:
+                match_type = "NORMALIZED"
+                score = 0.99
+            else:
+                continue
+
+            results.append({
+                "lemma": lemma,
+                "definition": clean_definition(definition or ""),
+                "score": score,
+                "match_type": match_type,
+            })
+
+            if len(results) >= top_k:
+                break
+
+    finally:
+        con.close()
+
+    results.sort(
+        key=lambda item: (
+            item["match_type"] != "EXACT",
+            item["lemma"],
+        )
+    )
+
+    return results
+
+
+
+
+
+def _cross_reference_index_path():
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent / "data" / "cache" / "lsj_crossrefs.json"
+
+
+def _load_cross_reference_index():
+    """Load or rebuild an independent, disposable LSJ reference cache."""
+    import json
+    import re
+    import os
+    from collections import defaultdict
+
+    cache = _cross_reference_index_path()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+
+    signature = {
+        "size": LEXICON_DB.stat().st_size,
+        "mtime_ns": LEXICON_DB.stat().st_mtime_ns,
+        "version": 1,
+    }
+
+    if cache.exists():
+        try:
+            payload = json.loads(cache.read_text(encoding="utf-8"))
+            if payload.get("signature") == signature:
+                return payload["references"]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    references = defaultdict(list)
+
+    con = sqlite3.connect(
+        f"file:{LEXICON_DB.resolve()}?mode=ro",
+        uri=True,
+        timeout=30,
+    )
+
+    try:
+        rows = con.execute(
+            """
+            SELECT greek_lemma, definition
+            FROM entries
+            WHERE greek_lemma IS NOT NULL
+              AND definition IS NOT NULL
+            """
+        )
+
+        for lemma, raw_definition in rows:
+            definition = clean_definition(raw_definition)
+            normalized = normalize_greek_lemma(definition)
+
+            for match in re.finditer(
+                r"\\b(?:v\\.|see\\s+)\\s*([\\u0370-\\u03ff\\u1f00-\\u1fff]+)",
+                normalized,
+                re.IGNORECASE,
+            ):
+                target = match.group(1)
+                if normalize_greek_lemma(lemma) == target:
+                    continue
+
+                references[target].append({
+                    "lemma": lemma,
+                    "definition": definition,
+                    "score": 0.98,
+                    "match_type": "CROSS_REFERENCE",
+                })
+    finally:
+        con.close()
+
+    payload = {
+        "signature": signature,
+        "references": dict(references),
+    }
+
+    temporary = cache.with_name(cache.name + f".{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temporary, cache)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    return payload["references"]
+
+
+
+def retrieve_cross_references(query, top_k=8):
+    """Find explicit LSJ references after decoding Beta Code."""
+    import re
+
+    if top_k <= 0:
+        return []
+
+    target = normalize_greek_lemma(query)
+    results = []
+
+    con = sqlite3.connect(
+        f"file:{LEXICON_DB.resolve()}?mode=ro",
+        uri=True,
+        timeout=30,
+    )
+
+    try:
+        rows = con.execute(
+            """
+            SELECT greek_lemma, definition
+            FROM entries
+            WHERE greek_lemma IS NOT NULL
+              AND definition IS NOT NULL
+            """
+        )
+
+        for lemma, raw_definition in rows:
+            if normalize_greek_lemma(lemma) == target:
+                continue
+
+            definition = clean_definition(raw_definition)
+            normalized = normalize_greek_lemma(definition)
+
+            pattern = (
+                r"(?:\bv\.|\bsee\s+)\s*"
+                + re.escape(target)
+                + r"(?!\w)"
+            )
+
+            if not re.search(pattern, normalized, re.IGNORECASE):
+                continue
+
+            results.append({
+                "lemma": lemma,
+                "definition": definition,
+                "score": 0.98,
+                "match_type": "CROSS_REFERENCE",
+            })
+
+            if len(results) >= top_k:
+                break
+
+    finally:
+        con.close()
+
+    return results
+
+def retrieve_semantic(query, top_k=8):
+    """Retrieve existing embeddings without modifying the database."""
     response = requests.post(
         f"{OLLAMA}/api/embed",
         json={"model": EMBED_MODEL, "input": query},
@@ -49,7 +265,7 @@ def retrieve(query, top_k=8):
     q /= max(np.linalg.norm(q), 1e-12)
 
     con = sqlite3.connect(
-        f"file:{DB}?mode=ro",
+        f"file:{DB.resolve()}?mode=ro",
         uri=True,
         timeout=30,
     )
@@ -67,7 +283,6 @@ def retrieve(query, top_k=8):
         )
 
         for lemma, definition, blob in rows:
-
             v = np.frombuffer(blob, dtype=np.float32)
 
             if v.shape != q.shape:
@@ -82,19 +297,59 @@ def retrieve(query, top_k=8):
 
             results.append({
                 "lemma": lemma,
-                "definition": clean_definition(definition),
+                "definition": clean_definition(definition or ""),
                 "score": score,
+                "match_type": "SEMANTIC",
             })
 
     finally:
         con.close()
 
     results.sort(
-        key=lambda x: x["score"],
+        key=lambda item: item["score"],
         reverse=True,
     )
 
     return results[:top_k]
+
+
+
+def retrieve(query, top_k=8):
+    """Exact, normalized, cross-reference, then semantic retrieval."""
+    exact = retrieve_exact(query, top_k=top_k)
+
+    remaining = max(0, top_k - len(exact))
+    cross_refs = (
+        retrieve_cross_references(query, top_k=remaining)
+        if remaining else []
+    )
+
+    combined = []
+    seen = set()
+
+    for entry in exact + cross_refs:
+        key = normalize_greek_lemma(entry["lemma"])
+        if key not in seen:
+            seen.add(key)
+            combined.append(entry)
+
+    if len(combined) < top_k:
+        try:
+            semantic = retrieve_semantic(query, top_k=top_k)
+        except (requests.RequestException, KeyError, ValueError):
+            if not combined:
+                raise
+            semantic = []
+
+        for entry in semantic:
+            key = normalize_greek_lemma(entry["lemma"])
+            if key not in seen:
+                seen.add(key)
+                combined.append(entry)
+            if len(combined) >= top_k:
+                break
+
+    return combined[:top_k]
 
 
 def show_evidence(results):
@@ -113,10 +368,14 @@ def show_evidence(results):
             f"{transliterate(entry['lemma'])}{RESET}"
         )
 
-        print(
-            f"{MAGENTA}🔮 Similarity: "
-            f"{entry['score']:.3f}{RESET}"
-        )
+        match_type = entry.get("match_type", "SEMANTIC")
+        if match_type == "SEMANTIC":
+            print(
+                f"{MAGENTA}🔮 Semantic similarity: "
+                f"{entry['score']:.3f}{RESET}"
+            )
+        else:
+            print(f"{GREEN}✓ Match: {match_type}{RESET}")
 
         print(highlight_lsj(entry["definition"]))
 
@@ -597,3 +856,26 @@ if __name__ == "__main__":
         top_k=args.top_k,
         show_sources=not args.hide_evidence,
     )
+
+
+
+def format_compact_evidence(results, max_definition=150):
+    """Render concise LSJ evidence without losing match provenance."""
+    output = []
+
+    for position, entry in enumerate(results, 1):
+        lemma = entry.get("lemma", "?")
+        match_type = entry.get("match_type", "SEMANTIC")
+        definition = " ".join(
+            str(entry.get("definition", "")).split()
+        )
+
+        if len(definition) > max_definition:
+            definition = definition[:max_definition].rsplit(" ", 1)[0] + "…"
+
+        output.append(
+            f"[{position}] {lemma} [{match_type}]\n"
+            f"    {definition}"
+        )
+
+    return "\n\n".join(output)

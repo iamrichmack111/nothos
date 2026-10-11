@@ -10,6 +10,16 @@ from .terminal import show_banner
 
 
 def main():
+    # NOTHOS_PRIMARY_V1: opt-in primary text mode; leave existing LSJ route untouched.
+    import sys as _nothos_sys
+    _nothos_args = _nothos_sys.argv[1:]
+    if (_nothos_args and _nothos_args[0] == "research" and
+        ("--engine" in _nothos_args and
+         _nothos_args[_nothos_args.index("--engine") + 1:_nothos_args.index("--engine") + 2] == ["primary"])):
+        from .primary_sources import run as _nothos_primary_run
+        return _nothos_primary_run([a for i, a in enumerate(_nothos_args[1:])
+                                    if i not in ( _nothos_args[1:].index("--engine"),
+                                                  _nothos_args[1:].index("--engine") + 1)])
     parser = argparse.ArgumentParser(
         prog="nothos",
         description=(
@@ -51,6 +61,11 @@ def main():
         choices=("auto", "full", "compact", "ascii", "none"),
         default="auto",
     )
+    research.add_argument(
+        "--full",
+        action="store_true",
+        help="Show complete LSJ definitions instead of compact results",
+    )
 
     banner = sub.add_parser(
         "banner",
@@ -89,6 +104,32 @@ def main():
         return
 
     if args.command == "research":
+        # NOTHOS_FULL_RAG_ROUTE_V1
+        if (
+            args.engine == "lsj"
+            and args.format == "text"
+            and not args.output
+            and not args.no_ai
+            and not args.full
+        ):
+            import subprocess
+            import sys
+            from pathlib import Path
+
+            root = Path(__file__).resolve().parent.parent
+            script = root / "tools" / "lsj_rag.py"
+
+            command = [
+                sys.executable,
+                str(script),
+                args.query,
+                "--top-k",
+                str(args.top_k),
+            ]
+
+            result = subprocess.run(command, cwd=str(root))
+            return result.returncode
+
         try:
             data = run_research(
                 args.query,
@@ -103,7 +144,17 @@ def main():
             else:
                 if args.format == "text":
                     show_banner(args.banner)
-                print(render(data, args.format))
+                    if (
+                        args.engine == "lsj"
+                        and args.no_ai
+                        and not args.full
+                    ):
+                        from .compact import render_compact
+                        print(render_compact(data))
+                    else:
+                        print(render(data, args.format))
+                else:
+                    print(render(data, args.format))
 
         except (ValueError, RuntimeError) as exc:
             parser.exit(1, f"NOTHOS error: {exc}\n")
