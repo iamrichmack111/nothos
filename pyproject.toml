@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nothos-research"
+version = "6.0.0"
+description = "Ancient Greek philology and mythology research toolkit"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26,<3",
+    "requests>=2.31,<3",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+nothos = "nothos_cli.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nothos_cli*"]

@@ -49,3 +49,36 @@ id_ed25519
 cache/
 tmp/
 outputs/
+
+
+# NOTHOS local research databases and active SQLite files
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Python packaging
+*.egg-info/
+build/
+dist/
+.venv/
+__pycache__/
+*.pyc
+
+# Local research exports
+/reports/
+/hermes.md
+
+# Local secrets
+.env
+.env.*
+*.pem
+*.key
