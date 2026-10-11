@@ -1,5 +1,16 @@
 # NOTHOS v6 — Medusa Edition
 
+<!-- NOTHOS_BADGES_START -->
+
+[![Python CI](https://github.com/iamrichmack111/nothos/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iamrichmack111/nothos/actions/workflows/ci.yml)
+[![Security](https://github.com/iamrichmack111/nothos/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/iamrichmack111/nothos/actions/workflows/security.yml)
+[![Release CD](https://github.com/iamrichmack111/nothos/actions/workflows/release.yml/badge.svg)](https://github.com/iamrichmack111/nothos/actions/workflows/release.yml)
+![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue)
+![Version](https://img.shields.io/badge/version-6.0.0-gold)
+![License](https://img.shields.io/badge/license-not%20declared-lightgrey)
+
+<!-- NOTHOS_BADGES_END -->
+
 Ancient Greek philology, mythology, semantic search, and evidence-aware
 research powered by LSJ dictionaries and local Ollama models.
 
