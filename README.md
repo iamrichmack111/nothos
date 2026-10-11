@@ -362,3 +362,17 @@ be checked against the underlying Greek evidence.
 No repository license has been declared.
 Source code, dictionary data, and imported passages may
 have different redistribution requirements.
+
+<!-- NOTHOS-DEMO-START -->
+## 🐍 NOTHOS — Greek Dictionary Demonstration
+
+<p align="center"><img src="assets/medusa.png" alt="NOTHOS Medusa" width="260"></p>
+
+<p align="center"><img src="assets/demo/nothos-dictionary-fast.gif" alt="NOTHOS CLI dictionary demonstration" width="100%"></p>
+
+```bash
+nothos research "Ἑρμῆς" --no-ai --top-k 5
+```
+
+Exact Greek lemma matches · LSJ cross-references · Semantic search
+<!-- NOTHOS-DEMO-END -->
