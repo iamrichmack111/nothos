@@ -10,6 +10,18 @@ from .terminal import show_banner
 
 
 def main():
+    # NOTHOS_TEMPLE_BRIDGE_V1
+    import sys as _temple_sys
+    _temple_argv = _temple_sys.argv[1:]
+
+    if (
+        _temple_argv
+        and _temple_argv[0] == "research"
+        and "--sources" in _temple_argv
+    ):
+        from .temple_bridge import run as _temple_run
+        return _temple_run(_temple_argv[1:])
+
     # NOTHOS_PRIMARY_V1: opt-in primary text mode; leave existing LSJ route untouched.
     import sys as _nothos_sys
     _nothos_args = _nothos_sys.argv[1:]
@@ -149,8 +161,18 @@ def main():
                         and args.no_ai
                         and not args.full
                     ):
-                        from .compact import render_compact
-                        print(render_compact(data))
+                        try:
+                            from .compact import render_compact
+                        except ModuleNotFoundError as exc:
+                            if exc.name != "nothos_cli.compact":
+                                raise
+                            from .temple_bridge import highlight as _v9_hl
+                            import sys as _v9_sys
+                            _v9_text = render(data, args.format)
+                            _v9_color = _v9_sys.stdout.isatty()
+                            print(_v9_hl(_v9_text, args.query, _v9_color))
+                        else:
+                            print(render_compact(data))
                     else:
                         print(render(data, args.format))
                 else:

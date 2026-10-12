@@ -195,6 +195,10 @@ def retrieve_cross_references(query, top_k=8):
     """Find explicit LSJ references after decoding Beta Code."""
     import re
 
+    # LSJ headword cross-references in this index point to Greek lemmas.
+    # Reject Latin queries (e.g. Hermes, which is also a journal title).
+    if not any("\u0370" <= ch <= "\u03ff" or "\u1f00" <= ch <= "\u1fff" for ch in query):
+        return []
     if top_k <= 0:
         return []
 
@@ -247,6 +251,82 @@ def retrieve_cross_references(query, top_k=8):
         con.close()
 
     return results
+
+
+# ============================================================
+# NOTHOS FAISS VECTOR RETRIEVAL
+# ============================================================
+
+_FAISS_INDEX = None
+_FAISS_METADATA = None
+
+import faiss
+faiss.omp_set_num_threads(1)
+
+def retrieve_faiss(query_vector, top_k=8):
+    """Search the existing LSJ FAISS index without re-embedding."""
+    global _FAISS_INDEX, _FAISS_METADATA
+
+    import faiss
+    import numpy as np
+    import sqlite3
+
+    index_path = ROOT / "data/dictionaries/lsj.faiss"
+
+    if not index_path.exists():
+        raise FileNotFoundError(
+            f"FAISS index missing: {index_path}"
+        )
+
+    if _FAISS_INDEX is None:
+        _FAISS_INDEX = faiss.read_index(str(index_path))
+
+    if _FAISS_METADATA is None:
+        con = sqlite3.connect(
+            f"file:{DB.resolve()}?mode=ro",
+            uri=True
+        )
+        try:
+            _FAISS_METADATA = con.execute("""
+                SELECT rowid, lemma, definition
+                FROM embeddings
+                WHERE model = ?
+                ORDER BY rowid
+            """, (EMBED_MODEL,)).fetchall()
+        finally:
+            con.close()
+
+    if _FAISS_INDEX.ntotal != len(_FAISS_METADATA):
+        raise ValueError("FAISS/SQLite mapping mismatch")
+
+    vector = np.asarray(query_vector, dtype=np.float32)
+    vector = vector.reshape(1, -1).copy()
+
+    if vector.shape[1] != _FAISS_INDEX.d:
+        raise ValueError("Query embedding dimension mismatch")
+
+    faiss.normalize_L2(vector)
+
+    scores, positions = _FAISS_INDEX.search(vector, top_k)
+
+    results = []
+
+    for score, position in zip(scores[0], positions[0]):
+        if position < 0:
+            continue
+
+        rowid, lemma, definition = _FAISS_METADATA[position]
+
+        results.append({
+            "lemma": lemma,
+            "definition": clean_definition(definition or ""),
+            "score": float(score),
+            "match_type": "SEMANTIC_FAISS",
+            "rowid": rowid,
+        })
+
+    return results
+
 
 def retrieve_semantic(query, top_k=8):
     """Retrieve existing embeddings without modifying the database."""
@@ -316,6 +396,17 @@ def retrieve_semantic(query, top_k=8):
 
 def retrieve(query, top_k=8):
     """Exact, normalized, cross-reference, then semantic retrieval."""
+    # NOTHOS_HERMES_LEMMA_GUARD_V1
+    # English/transliterated deity names are not LSJ Greek headwords.
+    # Journal references such as "v. Hermes 46.274" are bibliography, NOT
+    # references to the god. Resolve this unambiguous alias before retrieval.
+    if query.strip().casefold() in {"hermes", "hermēs"}:
+        exact = retrieve_exact("Ἑρμῆς", top_k=top_k)
+        if not exact:
+            print("⚠️ Greek LSJ headword Ἑρμῆς not found. No evidence returned; "
+                  "journal citations to Hermes are not deity evidence.")
+        return exact
+
     exact = retrieve_exact(query, top_k=top_k)
 
     remaining = max(0, top_k - len(exact))
@@ -609,6 +700,13 @@ CRITICAL EVIDENCE RULES:
 9. Distinguish attested meaning from interpretation.
 10. If evidence is insufficient, explicitly say so.
 11. Never interpret embedding similarity as etymological proof.
+    11a. "Hermes" followed by volume/page numbers (for example,
+         "v. Hermes 46.274") refers to the scholarly journal Hermes.
+         It is NOT an attestation of or an etymology for the deity.
+    11b. Never infer the meaning of the QUESTION from incidental words
+         in bibliographic citations or from unrelated dictionary entries.
+    11c. A source number only proves that an entry was retrieved.
+         It does not prove that an assertion is supported.
 12. Do not confuse author abbreviations:
     Ar. = Aristophanes
     A. = Aeschylus
@@ -648,19 +746,15 @@ Provide a concise, evidence-based conclusion.
 
 
 def evidence_locked_report(answer, results):
-    """Create one evidence-based report; keep AI claims clearly labeled."""
+    """Display sourced LSJ context plus whatever usable model answer was returned."""
+    # NOTHOS_OUTPUT_FIX_V1
     import re
 
     output = ["🔒 LSJ-ATTESTED VOCABULARY", ""]
-
     for i, entry in enumerate(results, 1):
-        output.append(
-            f"[{i}] {entry['lemma']} "
-            f"({transliterate(entry['lemma'])})"
-        )
+        output.append(f"[{i}] {entry['lemma']} ({transliterate(entry['lemma'])})")
 
     output.extend(["", "📜 SOURCE ABBREVIATIONS FOUND IN LSJ", ""])
-
     seen = set()
     for i, abbr, author in verified_sources(results):
         key = (i, abbr)
@@ -669,41 +763,27 @@ def evidence_locked_report(answer, results):
             seen.add(key)
 
     output.extend([
-        "",
-        "These references appear in LSJ entries.",
+        "", "These references appear in LSJ entries.",
         "The cited ancient passages have not been independently verified.",
-        "",
-        "🧠 AI INTERPRETATION — NOT INDEPENDENTLY VERIFIED",
-        "",
+        "", "🧠 AI INTERPRETATION — NOT INDEPENDENTLY VERIFIED", "",
     ])
 
-    headings = [
-        "🏛️ CORE MEANING",
-        "🇬🇷 RELATED GREEK VOCABULARY",
-        "📖 MORPHOLOGY AND ETYMOLOGY",
-        "📜 ANCIENT SOURCES",
-        "⚖️ EVIDENCE VS INTERPRETATION",
-        "🧠 SYNTHESIS",
-    ]
-
-    pattern = "(" + "|".join(re.escape(h) for h in headings) + ")"
-    parts = re.split(pattern, answer)
-
-    sections = {}
-    for i in range(1, len(parts) - 1, 2):
-        sections[parts[i]] = parts[i + 1].strip()
-
-    # Exclude AI-generated vocabulary, morphology, and source claims.
-    for heading in [
-        "🏛️ CORE MEANING",
-        "⚖️ EVIDENCE VS INTERPRETATION",
-        "🧠 SYNTHESIS",
-    ]:
-        body = sections.get(heading)
-        if body:
-            output.extend([heading, "", body, ""])
-
+    answer = (answer or "").strip()
+    # Headings are optional: don't throw away text if an LLM omits or edits them.
+    # Unwanted sections remain visibly AI-generated rather than being promoted
+    # to independent verified evidence.
+    if answer:
+        output.append(answer)
+    else:
+        output.extend([
+            "⚠️ No usable Ollama interpretation was returned.",
+            "The following are unanalysed LSJ entries, NOT an AI conclusion:",
+            "",
+        ])
+        for i, entry in enumerate(results, 1):
+            output.append(f"[{i}] {entry['lemma']}: {entry['definition'][:1500]}")
     return "\n".join(output)
+
 
 
 
@@ -728,7 +808,62 @@ def verify_citations(answer, count):
     return valid, invalid
 
 
-def explain(query, top_k=8, show_sources=True):
+# NOTHOS_FAST_V1: optional concise single-generation mode.
+def fast_lsj_prompt(query, results):
+    """Pass short, bounded evidence to Ollama; do not assert unsupported roles."""
+    import re
+    packet = []
+    for i, item in enumerate(results[:4], 1):
+        definition = re.sub(r"\s+", " ", item.get("definition", ""))[:1400]
+        packet.append(f"[{i}] HEADWORD: {item['lemma']}\nMATCH: {item.get('match_type', 'UNKNOWN')}\nLSJ: {definition}")
+    context = "\n\n".join(packet)
+    return f"""You are NOTHOS, a cautious Ancient Greek lexicon assistant.
+Answer the query from the LSJ excerpts ONLY, briefly (max 180 words).
+Query: {query}
+LSJ excerpts:
+{context}
+Rules:
+- First give the direct lexicon meaning of the exact headword, if present.
+- State grammatical forms only when the evidence explicitly supports them.
+- Cite claims using [1], [2], etc. matching the supplied excerpts.
+- Bibliography (e.g., 'Hermes 46.274') is NOT evidence about the god Hermes.
+- Do NOT infer messenger, commerce, ritual, origins, or history from bare citations.
+- Do NOT invent authors, quotations, or a word's part of speech.
+- If the excerpts do not support a claim, omit it.
+- Distinguish a dictionary citation from reading the primary source.
+Format exactly:
+🏛️ CORE MEANING
+(2-3 sentences, cited)
+⚖️ EVIDENCE VS INTERPRETATION
+(1-2 sentences, cited)
+🧠 SYNTHESIS
+(1 sentence, cited)
+Return answer only."""
+
+
+def _nothos_legacy_explain(query, top_k=8, show_sources=True):
+
+    # FAST exact dictionary lookups bypass Ollama completely.
+    # Semantic or cross-reference-only results still use research mode.
+    if os.getenv("NOTHOS_FAST", "0") == "1":
+        exact = retrieve_exact(query, top_k=top_k)
+
+        if exact:
+            if show_sources:
+                show_evidence(exact)
+
+            print("\\n⚡ NOTHOS LEXICON MODE — NO AI GENERATION")
+            print("🔒 Direct LSJ evidence; no AI interpretation.\\n")
+
+            for i, entry in enumerate(exact, 1):
+                print(f"[{i}] {entry['lemma']}")
+                print(f"Match: {entry['match_type']}")
+                print(f"Source: LSJ")
+                print(entry["definition"])
+                print()
+
+            print("✅ Exact dictionary lookup complete.")
+            return
 
     results = retrieve(query, top_k)
 
@@ -748,11 +883,11 @@ def explain(query, top_k=8, show_sources=True):
         f"{OLLAMA}/api/generate",
         json={
             "model": EXPLAIN_MODEL,
-            "prompt": build_prompt(query, results),
+            "prompt": fast_lsj_prompt(query, results) if os.getenv("NOTHOS_FAST", "0") == "1" else build_prompt(query, results),
             "stream": False,
             "options": {
                 "temperature": 0.1,
-                "num_predict": 1400,
+                "num_predict": 360 if os.getenv("NOTHOS_FAST", "0") == "1" else 1400,
             },
         },
         timeout=300,
@@ -761,29 +896,31 @@ def explain(query, top_k=8, show_sources=True):
     response.raise_for_status()
 
     answer = response.json().get("response", "").strip()
-
+    if not answer:
+        print(f"{YELLOW}⚠️ Ollama returned an empty draft; displaying retrieved LSJ evidence instead.{RESET}")
 
     audit_status = "NOT RUN"
 
-    if os.getenv("NOTHOS_AUDIT", "0") == "1":
+    if answer and os.getenv("NOTHOS_AUDIT", "0") == "1" and os.getenv("NOTHOS_FAST", "0") != "1":
         print()
         print(f"{CYAN}🛡️ VERIFYING AUTHOR REFERENCES, MORPHOLOGY AND EVIDENCE...{RESET}")
 
         try:
             audited = audit_answer(query, results, answer)
 
-            if audited:
+            if audited and len(audited.strip()) >= 40:
                 answer = audited
-                audit_status = "AI REVIEW COMPLETED"
+                audit_status = "AI REVIEW COMPLETED (NOT INDEPENDENTLY VERIFIED)"
             else:
-                audit_status = "EMPTY RESPONSE"
+                audit_status = "EMPTY/SHORT AUDIT; ORIGINAL DRAFT PRESERVED"
+                print(f"{YELLOW}⚠️ Audit returned no usable answer; keeping original draft.{RESET}")
 
         except Exception as exc:
             audit_status = "FAILED"
             print(f"{YELLOW}⚠️ Scholarly audit unavailable: {exc}{RESET}")
 
     else:
-        print(f"{YELLOW}⚡ Second-pass AI audit skipped (enable with NOTHOS_AUDIT=1).{RESET}")
+        print(f"{YELLOW}⚡ Second-pass AI audit skipped (FAST mode uses one short model call).{RESET}" if os.getenv("NOTHOS_FAST", "0") == "1" else f"{YELLOW}⚡ Second-pass AI audit skipped (enable with NOTHOS_AUDIT=1).{RESET}")
 
     print(f"\n{YELLOW}🏛️ NOTHOS RAG RESEARCH{RESET}\n")
     print(highlight_lsj(evidence_locked_report(answer, results)))
@@ -823,6 +960,163 @@ def explain(query, top_k=8, show_sources=True):
         f"{WHITE}Note: This verifies source-number existence, "
         f"not whether each claim is supported.{RESET}"
     )
+
+
+# NOTHOS_COMBINED_V1
+
+def _nothos_lexical_neighbors(lemma, top_k=6):
+    """Find neighbor words from an existing vector, with index-alignment safeguard."""
+    import numpy as np
+    import sqlite3
+    import faiss
+    db = sqlite3.connect(f"file:{DB.resolve()}?mode=ro", uri=True)
+    try:
+        row = db.execute(
+            "SELECT rowid,vector FROM embeddings WHERE model=? AND lemma=? LIMIT 1",
+            (EMBED_MODEL, lemma)
+        ).fetchone()
+        if not row:
+            # Greek Unicode normalization and accents can differ between databases.
+            for rid, label, blob in db.execute(
+                "SELECT rowid,lemma,vector FROM embeddings WHERE model=?",
+                (EMBED_MODEL,)
+            ):
+                if normalize_greek_lemma(label) == normalize_greek_lemma(lemma):
+                    row = (rid, blob)
+                    break
+        if not row:
+            return [], 'No stored vector for this headword'
+        rid, blob = row
+        # Positions are ORDER BY rowid, not necessarily rowid-1.
+        pos = db.execute(
+            'SELECT COUNT(*) FROM embeddings WHERE model=? AND rowid < ?',
+            (EMBED_MODEL, rid)
+        ).fetchone()[0]
+        vector = np.frombuffer(blob, dtype=np.float32).copy()
+        index = faiss.read_index(str(ROOT / 'data/dictionaries/lsj.faiss'))
+        count = db.execute('SELECT COUNT(*) FROM embeddings WHERE model=?', (EMBED_MODEL,)).fetchone()[0]
+        if index.ntotal != count or index.d != len(vector):
+            return [], 'FAISS index count/dimension mismatch; rebuild required'
+        # Detect stale/misaligned index for the exact headword.
+        check = np.empty((1, len(vector)), dtype=np.float32)
+        check[0] = vector
+        faiss.normalize_L2(check)
+        stored_in_index = index.reconstruct(int(pos))
+        if np.dot(stored_in_index, check[0]) < 0.999:
+            return [], 'FAISS index is stale or misaligned; refusing to show neighbors'
+        return retrieve_faiss(vector, top_k=top_k), None
+    finally:
+        db.close()
+
+
+# NOTHOS_GROUNDING_V1
+
+def _nothos_clean_lsj_text(value):
+    """Correct a tiny, reviewed set of extraction typos in display/AI only."""
+    import re
+    value = str(value or '')
+    value = re.sub(r'\bmght-season\b', 'night-season', value, flags=re.I)
+    value = re.sub(r'\bmonth-season\b', 'night-season', value, flags=re.I)
+    return value
+
+
+def _nothos_short_ai(query, entry, neighbors):
+    """One brief answer grounded in LSJ, never a second generative audit."""
+    import requests
+    import re
+
+    definition = ' '.join(_nothos_clean_lsj_text(entry['definition']).split())
+    # Front matter often contains only inflectional citations. Include a
+    # meaning-bearing passage farther down if it exists (e.g. Nyx the goddess).
+    excerpt = definition[:1000]
+    for marker in ('the goddess of Night', 'Hermes, son of Zeus and Maia',
+                   'as pr. n.', 'the planet Mercury'):
+        hit = definition.casefold().find(marker.casefold())
+        if hit >= 0 and marker.casefold() not in excerpt.casefold():
+            excerpt += '\nADDITIONAL LSJ PASSAGE: ' + definition[max(0, hit-90):hit+240]
+            break
+
+    prompt = (
+        'You explain an Ancient Greek LSJ lexicon entry in plain English. '
+        'Answer in no more than 65 words, in 2-3 sentences. '
+        'No heading, no introduction, no final task statement. '
+        'The exact headword is supplied by the application; do NOT invent, '
+        'rewrite, transliterate, or start your answer with a Greek headword. '
+        'State only meanings explicitly present in LSJ evidence below. '
+        'Do not derive myths, roles, etymologies, or source contents from citations. '
+        'If LSJ explicitly calls the word a deity, mention that fact. '
+        'Do not treat neighboring vector results as proof of any connection. '
+        'If a detail is missing, omit it. Cite [1] once.\n'
+        f'QUESTION: {query}\nLSJ HEADWORD: {entry["lemma"]}\n'
+        f'LSJ EVIDENCE: {excerpt}\nANSWER:'
+    )
+    response = requests.post(
+        f'{OLLAMA}/api/generate',
+        json={
+            'model': EXPLAIN_MODEL, 'prompt': prompt, 'stream': False,
+            'options': {'temperature': 0, 'num_predict': 115},
+        },
+        timeout=75,
+    )
+    response.raise_for_status()
+    answer = response.json().get('response', '').strip()
+    answer = _nothos_clean_lsj_text(answer)
+    # Basic hard-fail for known original Nyx failure; not formal entailment.
+    if re.search(r'\bmonth-season\b|ΟΜΕΡΟΣ|ΟΜΕΓΟΣ', answer, re.I):
+        return ''
+    return answer
+
+
+
+def explain(query, top_k=8, show_sources=True):
+    """Compact exact LSJ lookup + FAISS neighbors + optional single Ollama call."""
+    import os
+    from requests import RequestException
+    exact = retrieve_exact(query, top_k=min(top_k, 4))
+    if not exact:
+        print('No exact LSJ headword. Trying existing research pipeline...')
+        try:
+            return _nothos_legacy_explain(query, top_k=top_k, show_sources=show_sources)
+        except RequestException as exc:
+            print('⚠️ Semantic embedding unavailable; cannot research free-text query.')
+            print(f'   {exc}')
+            return
+
+    entry = exact[0]
+    print(f'\n{YELLOW}🏛️ NOTHOS — LSJ LEXICON + FAISS{RESET}')
+    print(f'{YELLOW}🇬🇷 {entry["lemma"]}{RESET}  |  {GREEN}{entry["match_type"]}{RESET}')
+    print(f'{CYAN}📖 LSJ [1] — direct dictionary evidence{RESET}')
+    raw = ' '.join(_nothos_clean_lsj_text(entry['definition']).split())
+    # Give full definition only if explicitly requested; never print it twice.
+    full = os.getenv('NOTHOS_FULL', '0') == '1'
+    print(highlight_lsj(raw if full else raw[:1250] + ('…' if len(raw)>1250 else '')))
+    try:
+        neighbors, note = _nothos_lexical_neighbors(entry['lemma'], top_k=6)
+    except (OSError, ValueError, ImportError) as exc:
+        neighbors, note = [], str(exc)
+    if neighbors:
+        print(f'\n{MAGENTA}🔮 RELATED LSJ HEADWORDS (FAISS; lexical relatedness not proven){RESET}')
+        for result in neighbors:
+            print(
+                f'  {CYAN}{result["score"]:.4f}{RESET}  '
+                f'{YELLOW}{result["lemma"]:<22}{RESET} '
+                f'{MAGENTA}({transliterate(result["lemma"])}){RESET}'
+            )
+    elif note:
+        print('\n⚠️ FAISS:', note)
+
+    # Fast mode defaults to zero AI; use NOTHOS_AI=1 to opt back in.
+    use_ai = os.getenv('NOTHOS_AI', '0' if os.getenv('NOTHOS_FAST','0')=='1' else '1') == '1'
+    if use_ai:
+        print(f'\n{MAGENTA}🧠 AI EXPLANATION — GENERATED, NOT INDEPENDENTLY VERIFIED{RESET}')
+        try:
+            answer = _nothos_short_ai(query, entry, neighbors)
+            print(highlight_lsj(answer) if answer else f'{YELLOW}⚠️ Ollama returned no explanation; LSJ evidence remains above.{RESET}')
+        except (RequestException, ValueError, KeyError) as exc:
+            print(f'⚠️ Ollama unavailable: {exc}')
+    else:
+        print('\n⚡ No Ollama generation (enable with NOTHOS_AI=1).')
+    print(f'\n{YELLOW}🛡️ LSJ is cited as [1]; AI claim entailment has NOT been verified.{RESET}')
 
 
 if __name__ == "__main__":
