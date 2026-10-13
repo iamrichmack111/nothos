@@ -407,17 +407,26 @@ def run(argv):
     parser.add_argument("query")
     parser.add_argument("--sources", required=True)
     parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument("--output", metavar="PATH",
+                        help="Save full LSJ, Temple and AI output to a UTF-8 text file")
+    parser.add_argument("--model", metavar="OLLAMA_MODEL",
+                        help="Override NOTHOS_AI_MODEL for this research command")
     parser.add_argument("--all", action="store_true",
                         help="Return all matching Temple passages per corpus")
     parser.add_argument("--fuzzy", action="store_true",
                         help="Suggest near-spellings only if exact search finds no passages")
     parser.add_argument("--no-ai", action="store_true")
     parser.add_argument("--format", choices=("text", "json"), default="text")
-    parser.add_argument("--output")
     parser.add_argument("--banner", default="auto")
     parser.add_argument("--full", action="store_true")
 
     args = parser.parse_args(argv)
+    # NOTHOS_V12_OUTPUT_MODEL: keep output capture alive through V11 atexit AI.
+    if args.model:
+        import os as _v12_os
+        _v12_os.environ["NOTHOS_AI_MODEL"] = args.model
+    if args.output:
+        _v12_capture_output(args.output)
 
     if args.top_k < 1:
         parser.error("--top-k must be positive")
@@ -441,6 +450,9 @@ def run(argv):
         hits = search_temple(args.query, sources,
                              None if args.all else args.top_k,
                              fuzzy=args.fuzzy)
+        # NOTHOS_V14_SINGLE_WRITER: synthesize after all evidence is printed.
+        synthesize = not args.no_ai and args.format == "text"
+        _nothos_snapshot = [dict(x) for x in hits] if synthesize else []
     except (sqlite3.Error, OSError) as exc:
         parser.exit(1, f"Temple database error: {exc}\n")
 
@@ -545,7 +557,7 @@ def run(argv):
         output = "\n".join(lines)
 
     # Existing LSJ/FAISS route remains the authority for LSJ output.
-    if "lsj" in sources and args.format == "text" and not args.output:
+    if "lsj" in sources and args.format == "text":
         executable = shutil.which("nothos")
 
         if not executable:
@@ -572,12 +584,214 @@ def run(argv):
                 file=sys.stderr,
             )
 
+    # Single writer: stdout is already being captured by _v12_capture_output.
+    # NEVER overwrite the capture destination independently.
+    print(output, flush=True)
+    if synthesize:
+        _nothos_grounded_ai(args.query, _nothos_snapshot, sources)
+        sys.stdout.flush()
     if args.output:
-        path = Path(args.output).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(output + "\n", encoding="utf-8")
-        print(f"Saved: {path}")
-    else:
-        print(output)
-
+        print(f"Saved: {Path(args.output).expanduser()}", flush=True)
     return 0
+
+
+# NOTHOS_V11_GROUNDED_AI — grounded post-retrieval synthesis (read-only).
+def _nothos_grounded_ai(query, hits, sources):
+    # NOTHOS_V13_REPORT_FIX: source evidence must precede AI.
+    import sys as _nothos_sys
+    _nothos_sys.stdout.flush()
+    """Use actual Temple hit text as evidence; never invent missing citations."""
+    import json as _json
+    import os as _os
+    import urllib.request as _request
+    import urllib.error as _error
+    from collections import defaultdict as _defaultdict
+
+    if not hits:
+        print("\n🧠 NOTHOS AI — No primary-source hits; synthesis skipped.", flush=True)
+        return
+
+    # Keep the full results available in ordinary output, but cap the model's
+    # context to prevent --all from exhausting the local model context window.
+    groups = _defaultdict(list)
+    for hit in hits:
+        groups[str(hit.get('corpus', 'UNKNOWN'))].append(hit)
+    sections = []
+    citation_keys = []
+    per_corpus = max(1, min(8, int(_os.getenv('NOTHOS_AI_PER_CORPUS', '5'))))
+    for corpus, entries in groups.items():
+        for hit in entries[:per_corpus]:
+            ref = str(hit.get('reference') or 'unreferenced')
+            title = str(hit.get('title') or 'untitled')
+            key = f'[{corpus}: {ref}]'
+            citation_keys.append(key)
+            excerpt = str(hit.get('excerpt') or '').strip()[:1100]
+            translation = str(hit.get('translation') or '').strip()[:450]
+            sections.append(
+                f'{key}\nTITLE: {title}\nMATCH: {hit.get("surface", "")}\n'
+                f'CLASS: {hit.get("match_class", "candidate")}\n'
+                f'GREEK: {excerpt}\n'
+                + (f'TRANSLATION (if supplied): {translation}\n' if translation else '')
+            )
+
+    system_prompt = (
+        'You are Nothos, a careful Ancient Greek source-analysis assistant. '
+        'Use ONLY the supplied primary-source excerpts for claims about their contents. '
+        'Distinguish lexical meaning, proper names, ordinary nouns, spelling similarity, '
+        'morphology, and mythology. Never treat fuzzy suggestions as verified identity. '
+        'Cite each textual claim using the exact bracketed SOURCE: REFERENCE identifier. '
+        'Do not fabricate LSJ definitions, sources, dates, translations, or citations. '
+        'LSJ data is not supplied to this synthesis, so do not claim to have consulted LSJ. '
+        'If a source is missing, say no retrieved evidence from that source. '
+        'Indicate uncertainty and alternative readings. Respond concisely in English.'
+    )
+    evidence = '\n\n'.join(sections)
+    user_prompt = (
+        f'RESEARCH QUERY: {query}\n'
+        f'REQUESTED PRIMARY COLLECTIONS: {", ".join(map(str, sources))}\n'
+        f'ACTUAL RETRIEVED EVIDENCE ({len(sections)} excerpts; not the entire corpus):\n'
+        f'{evidence}\n\n'
+        'Produce: (1) attested usage grouped by corpus, (2) comparative analysis, '
+        '(3) ambiguities or uncertain fuzzy/morphological matches. '
+        'Quote brief Greek phrases where useful, with exact bracketed citations. '
+        'Do not imply absence of a word in a corpus just because retrieval returned none.'
+    )
+
+    endpoint = _os.getenv('NOTHOS_OLLAMA_URL', 'http://richmack.local:11434').rstrip('/')
+    model = _os.getenv('NOTHOS_AI_MODEL', 'gemma3:4b')
+    try:
+        request = _request.Request(
+            endpoint + '/api/chat',
+            data=_json.dumps({
+                'model': model,
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+                'stream': False,
+                'options': {'temperature': 0.1, 'num_ctx': 8192, 'num_predict': 1100},
+            }, ensure_ascii=False).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}, method='POST',
+        )
+        with _request.urlopen(request, timeout=180) as response:
+            payload = _json.load(response)
+        answer = str(payload.get('message', {}).get('content', '')).strip()
+        if not answer:
+            raise ValueError('Ollama returned an empty response')
+        print('\n' + '═' * 65)
+        print('🧠 NOTHOS — OLLAMA GROUNDED COMPARATIVE ANALYSIS')
+        print(f'🔎 {query}  |  MODEL: {model}  |  EVIDENCE: {len(sections)} excerpts')
+        print('═' * 65)
+        print(answer)
+        print('\n🛡️ AI conclusions are interpretations; verify against the cited Greek.')
+    except (_error.URLError, TimeoutError, ValueError, OSError) as exc:
+        print(f'\n⚠️ Ollama synthesis unavailable: {exc}')
+        print('📜 Primary-source retrieval above is unaffected.')
+
+
+# NOTHOS_V12_OUTPUT_MODEL — V13 corrected complete transcript tee.
+def _v12_capture_output(destination):
+    """Tee all fd 1 bytes, with strict UTF-8-safe, no-ANSI saved reports."""
+    import atexit
+    import codecs
+    import os
+    import sys
+    import threading
+    from pathlib import Path
+
+    target = Path(destination).expanduser()
+    if target.is_dir():
+        raise IsADirectoryError(str(target))
+    # Fail before redirecting stdout if the path is unusable.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = target.open('w', encoding='utf-8', newline='\n')
+    saved_fd = os.dup(1)
+    was_tty = os.isatty(saved_fd)
+    read_fd, write_fd = os.pipe()
+    sys.stdout.flush()
+    os.dup2(write_fd, 1)
+    os.close(write_fd)
+
+    # Preserve undecodable raw source bytes reversibly in the report as \xHH.
+    # Also omit ANSI terminal escape controls without dropping Greek text.
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='backslashreplace')
+    ansi_mode = 0  # 0 normal, 1 ESC, 2 CSI, 3 OSC, 4 OSC-ESC
+    def clean_ansi(s):
+        nonlocal ansi_mode
+        out = []
+        for ch in s:
+            if ansi_mode == 0:
+                if ch == '\x1b':
+                    ansi_mode = 1
+                else:
+                    out.append(ch)
+            elif ansi_mode == 1:
+                if ch == '[':
+                    ansi_mode = 2
+                elif ch == ']':
+                    ansi_mode = 3
+                else:
+                    ansi_mode = 0
+            elif ansi_mode == 2:
+                if '@' <= ch <= '~':
+                    ansi_mode = 0
+            elif ansi_mode == 3:
+                if ch == '\x07':
+                    ansi_mode = 0
+                elif ch == '\x1b':
+                    ansi_mode = 4
+            elif ansi_mode == 4:
+                ansi_mode = 0 if ch == '\\' else 3
+        return ''.join(out)
+
+    def forward():
+        try:
+            while True:
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    break
+                # Forward the original bytes to the terminal, unchanged.
+                view = memoryview(chunk)
+                while view:
+                    n = os.write(saved_fd, view)
+                    view = view[n:]
+                decoded = decoder.decode(chunk)
+                if decoded:
+                    handle.write(clean_ansi(decoded))
+                    handle.flush()
+            trailing = decoder.decode(b'', final=True)
+            if trailing:
+                handle.write(clean_ansi(trailing))
+        finally:
+            os.close(read_fd)
+
+    worker = threading.Thread(target=forward, name='nothos-output-tee', daemon=True)
+    worker.start()
+
+    if was_tty:
+        class _TTYProxy:
+            def __init__(self, original):
+                self._original = original
+            def isatty(self):
+                return True
+            def __getattr__(self, name):
+                return getattr(self._original, name)
+            def write(self, value):
+                return self._original.write(value)
+            def flush(self):
+                return self._original.flush()
+        sys.stdout = _TTYProxy(sys.stdout)
+
+    def finish():
+        # Registered before V11's atexit AI callback; callbacks run LIFO.
+        # The AI callback now flushes all prior text before Ollama synthesis.
+        try:
+            sys.stdout.flush()
+            os.dup2(saved_fd, 1)
+            worker.join(timeout=30)
+            handle.flush()
+        finally:
+            os.close(saved_fd)
+            handle.close()
+
+    atexit.register(finish)
