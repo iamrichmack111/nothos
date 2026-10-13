@@ -1,0 +1,193 @@
+"""Read-only primary-source retrieval from The Temple."""
+
+import sqlite3
+import unicodedata
+from pathlib import Path
+
+TEMPLE_DB = (
+    Path.home()
+    / "backups/the-temple/temple-complete.sqlite3"
+)
+
+def normalize(text):
+    text = unicodedata.normalize("NFD", str(text).casefold())
+    text = "".join(
+        c for c in text
+        if unicodedata.category(c) != "Mn"
+    )
+    return text.replace("ς", "σ")
+
+
+def search_galen(lemmas, top_k=8):
+    """Find attested Galen passages through Temple's concordance."""
+
+    if not TEMPLE_DB.exists():
+        raise FileNotFoundError(TEMPLE_DB)
+
+    if isinstance(lemmas, str):
+        lemmas = [lemmas]
+
+    terms = list(dict.fromkeys(normalize(x) for x in lemmas))
+
+    if not terms or top_k < 1:
+        return []
+
+    con = sqlite3.connect(
+        f"file:{TEMPLE_DB.resolve()}?mode=ro",
+        uri=True,
+        timeout=15
+    )
+
+    try:
+        placeholders = ",".join("?" for _ in terms)
+
+        rows = con.execute(f"""
+            SELECT
+                c.item_id,
+                c.reference,
+                c.title,
+                c.surface,
+                c.lemma,
+                c.morphology,
+                p.greek,
+                p.translation
+            FROM concordance_forms c
+            JOIN corpus p
+              ON p.id = c.item_id
+             AND p.corpus = c.corpus
+            WHERE c.corpus = 'GALEN'
+              AND c.lemma_normalized IN ({placeholders})
+            ORDER BY c.item_id
+            LIMIT ?
+        """, [*terms, top_k * 10]).fetchall()
+
+        results = []
+        seen = set()
+
+        for row in rows:
+            (
+                item_id, reference, title,
+                surface, lemma, morphology,
+                greek, translation
+            ) = row
+
+            if item_id in seen:
+                continue
+
+            seen.add(item_id)
+
+            position = greek.find(surface) if greek and surface else -1
+
+            if position >= 0:
+                start = max(0, position - 180)
+                end = min(len(greek), position + 320)
+                context = greek[start:end]
+            else:
+                context = (greek or "")[:500]
+
+            results.append({
+                "item_id": item_id,
+                "reference": reference,
+                "title": title,
+                "surface": surface,
+                "lemma": lemma,
+                "morphology": morphology,
+                "greek": context,
+                "translation": translation,
+                "source": "GALEN",
+            })
+
+            if len(results) >= top_k:
+                break
+
+        return results
+
+    finally:
+        con.close()
+
+
+
+# ============================================================
+# NOTHOS — GREEK MATCH HIGHLIGHTING
+# ============================================================
+
+import re
+import unicodedata
+
+GOLD = "\\033[1;33m"
+GREEN = "\\033[1;32m"
+CYAN = "\\033[1;36m"
+RESET = "\\033[0m"
+
+
+def greek_highlight(text, surface):
+    """Highlight the matched Greek surface form in context."""
+    if not text or not surface:
+        return text or ""
+
+    # First attempt: exact Unicode match.
+    pattern = re.compile(re.escape(surface), re.IGNORECASE)
+
+    if pattern.search(text):
+        return pattern.sub(
+            lambda match: GOLD + match.group(0) + RESET,
+            text
+        )
+
+    # Fallback: accent-insensitive comparison with original offsets.
+    normalized_chars = []
+    offsets = []
+
+    for index, char in enumerate(text):
+        decomposed = unicodedata.normalize("NFD", char)
+
+        for c in decomposed:
+            if unicodedata.category(c) != "Mn":
+                normalized_chars.append(
+                    "σ" if c.casefold() == "ς" else c.casefold()
+                )
+                offsets.append(index)
+
+    normalized_text = "".join(normalized_chars)
+    normalized_surface = normalize(surface)
+
+    match = re.search(
+        re.escape(normalized_surface),
+        normalized_text
+    )
+
+    if not match:
+        return text
+
+    start = offsets[match.start()]
+    end = offsets[match.end() - 1] + 1
+
+    return (
+        text[:start]
+        + GOLD
+        + text[start:end]
+        + RESET
+        + text[end:]
+    )
+
+
+if __name__ == "__main__":
+    from sys import argv
+
+    terms = argv[1:] or ["χρῖσμα", "ἄλειμμα"]
+
+    results = search_galen(terms, top_k=8)
+
+    print("\n🏛️ NOTHOS — GALEN PRIMARY SOURCES\n")
+
+    for i, item in enumerate(results, 1):
+        print(f"\n[{i}] {item['title']}")
+        print("Reference:", item["reference"])
+        print("Greek word:", item["surface"])
+        print("Lemma:", item["lemma"])
+        print("Morphology:", item["morphology"])
+        print("Greek context:", greek_highlight(item["greek"], item["surface"]))
+        if item["translation"]:
+            print("Translation:", item["translation"][:300])
+
+    print(f"\n✅ Retrieved {len(results)} distinct passages")

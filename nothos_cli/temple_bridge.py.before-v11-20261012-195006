@@ -1,0 +1,583 @@
+
+"""Read-only bridge between NOTHOS and The Temple."""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+
+DB = Path.home() / "backups/the-temple/temple-complete.sqlite3"
+
+SOURCE_MAP = {
+    "galen": "GALEN",
+    "galen_latin": "GALEN_LATIN",
+    "lxx": "LXX",
+    "pgm": "MAGICAL",
+    "magical": "MAGICAL",
+}
+
+ESC = chr(27)
+
+
+def normalized(value):
+    value = unicodedata.normalize("NFD", str(value).casefold())
+    value = "".join(
+        ch for ch in value
+        if unicodedata.category(ch) != "Mn"
+    )
+    return value.replace("ς", "σ")
+
+
+def locate(text, word):
+    """Find Greek text with or without accents; retain original offsets."""
+    if not text or not word:
+        return -1, -1
+
+    chars = []
+    positions = []
+
+    for i, ch in enumerate(text):
+        for c in normalized(ch):
+            chars.append(c)
+            positions.append(i)
+
+    needle = normalized(word)
+    index = "".join(chars).find(needle)
+
+    if index < 0:
+        return -1, -1
+
+    return positions[index], positions[index + len(needle) - 1] + 1
+
+
+def highlight(text, word, enabled=True):
+    if not enabled:
+        return text
+
+    start, end = locate(text, word)
+    if start < 0:
+        return text
+
+    return (
+        text[:start]
+        + ESC + "[1;33m"
+        + text[start:end]
+        + ESC + "[0m"
+        + text[end:]
+    )
+
+
+def context(text, word, before=180, after=320):
+    start, end = locate(text, word)
+
+    if start < 0:
+        return text[:500]
+
+    return text[max(0, start-before):min(len(text), end+after)]
+
+
+
+
+def _word_match(text, word):
+    """Accent-insensitive match with Greek word boundaries."""
+    if not text or not word:
+        return -1, -1
+
+    offset = 0
+
+    while offset < len(text):
+        start, end = locate(text[offset:], word)
+
+        if start < 0:
+            return -1, -1
+
+        start += offset
+        end += offset
+
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+
+        # Greek combining marks belong to the adjacent word.
+        left = bool(before) and (
+            before.isalpha() or unicodedata.category(before).startswith("M")
+        )
+        right = bool(after) and (
+            after.isalpha() or unicodedata.category(after).startswith("M")
+        )
+
+        if not left and not right:
+            return start, end
+
+        offset = max(end, offset + 1)
+
+    return -1, -1
+
+
+def context(text, word, before=180, after=320):
+    start, end = _word_match(text, word)
+
+    if start < 0:
+        return ""
+
+    return text[max(0, start-before):min(len(text), end+after)]
+
+
+def highlight(text, word, enabled=True):
+    """Highlight every verified whole-word occurrence in gold."""
+    if not enabled or not text or not word:
+        return text
+
+    result = []
+    offset = 0
+
+    while offset < len(text):
+        start, end = _word_match(text[offset:], word)
+
+        if start < 0:
+            break
+
+        start += offset
+        end += offset
+
+        result.append(text[offset:start])
+        result.append(ESC + "[1;33m" + text[start:end] + ESC + "[0m")
+
+        offset = end
+
+    result.append(text[offset:])
+
+    return "".join(result)
+
+
+def _signature(text, surface):
+    """Normalized word window centered on the attested match."""
+    start, end = _word_match(text, surface)
+
+    if start < 0:
+        return ""
+
+    words_before = normalized(text[:start]).split()[-12:]
+    words_after = normalized(text[end:]).split()[:12]
+
+    return " ".join(
+        words_before + [normalized(surface)] + words_after
+    )
+
+
+def _is_duplicate(candidate, previous):
+    """Detect matching or substantially overlapping Greek contexts."""
+    from difflib import SequenceMatcher
+
+    if candidate == previous:
+        return True
+
+    a = candidate.split()
+    b = previous.split()
+
+    # Very short passages lack enough context for fuzzy deduplication.
+    if len(a) < 8 or len(b) < 8:
+        return False
+
+    # Do not merge substantially different passages.
+    return (
+        SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.84
+    )
+
+
+def _match_class(query, surface):
+    """Distinguish queried spelling, variants, and uncertain forms."""
+    q = normalized(query)
+    s = normalized(surface)
+
+    if q == s:
+        return "EXACT"
+
+    # Conservative list of observed Hermes inflections.
+    if q == "ερμησ":
+        known = {
+            "ερμη": "VOCATIVE / ACCENT-VARIANT CANDIDATE",
+            "ερμου": "GENITIVE CANDIDATE",
+            "ερμην": "ACCUSATIVE CANDIDATE",
+        }
+
+        if s in known:
+            # Lowercase manuscript forms can be legitimate;
+            # capitalization is not proof of lexical identity.
+            return known[s]
+
+    return "NORMALIZED LEMMA CANDIDATE"
+
+
+# NOTHOS_V9_FUZZY — opt-in spelling suggestions, never semantic equivalence.
+# NOTHOS_V10_RANKED_FUZZY — conservative one-edit correction, not lemma proof.
+def _fuzzy_candidates(con, sources, query, cutoff=0.78, maximum=12):
+    """Rank spelling candidates; avoid unrelated near-homographs.
+
+    Candidates must share the first two normalized characters and differ by
+    at most one insertion, deletion or substitution. No transliteration,
+    meaning, or morphological equivalence is implied.
+    """
+    target = normalized(query.strip())
+    if not target or ' ' in target or len(target) < 4:
+        return []
+
+    def distance_le_one(a, b):
+        if abs(len(a) - len(b)) > 1:
+            return False
+        if len(a) == len(b):
+            return sum(x != y for x, y in zip(a, b)) <= 1
+        short, long = (a, b) if len(a) < len(b) else (b, a)
+        i = j = errors = 0
+        while i < len(short) and j < len(long):
+            if short[i] == long[j]:
+                i += 1
+                j += 1
+            else:
+                errors += 1
+                if errors > 1:
+                    return False
+                j += 1
+        return True
+
+    def shared_prefix(a, b):
+        n = 0
+        for x, y in zip(a, b):
+            if x != y:
+                break
+            n += 1
+        return n
+
+    marks = ','.join('?' for _ in sources)
+    rows = con.execute(f"""
+        SELECT DISTINCT lemma_normalized
+        FROM concordance_forms
+        WHERE corpus IN ({marks})
+          AND lemma_normalized IS NOT NULL
+    """, sources)
+    vocabulary = set()
+    for (value,) in rows:
+        if not value:
+            continue
+        word = normalized(value)
+        if (word != target and word[:2] == target[:2]
+                and len(word) >= 3 and distance_le_one(target, word)):
+            vocabulary.add(word)
+
+    def rank(word):
+        # Common typo ζ replacing final ς: prefer restored dictionary-like -ς.
+        terminal_sigma = int(target.endswith('ζ') and word.endswith('σ'))
+        return (-terminal_sigma, -shared_prefix(target, word),
+                abs(len(word) - len(target)), word)
+
+    return sorted(vocabulary, key=rank)[:maximum]
+
+
+
+def search_temple(query, sources, limit, fuzzy=False):
+    """Return per-corpus attested matches; optional fallback for misspellings."""
+    from difflib import SequenceMatcher
+
+    requested = list(dict.fromkeys(
+        SOURCE_MAP[s] for s in sources if s in SOURCE_MAP
+    ))
+    if not requested:
+        return []
+    if not DB.is_file():
+        raise FileNotFoundError(DB)
+
+    requested_terms = list(dict.fromkeys(
+        normalized(w) for w in query.split() if w.strip()
+    ))
+    hermes_forms = {
+        "ερμησ": ("ερμησ", "ερμη", "ερμην", "ερμου")
+    }
+    exact_terms = list(dict.fromkeys(
+        form for word in requested_terms
+        for form in hermes_forms.get(word, (word,))
+    ))
+    if not exact_terms:
+        return []
+
+    con = sqlite3.connect(f"file:{DB.resolve()}?mode=ro", uri=True, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute("PRAGMA query_only=ON")
+
+        def fetch(terms, suggestion=False):
+            output = []
+            placeholders = ",".join("?" for _ in terms)
+            for corpus in requested:
+                # --all removes the SQL and display limit. The query remains
+                # read-only; users should expect lengthy output on common words.
+                limit_clause = "" if limit is None else "LIMIT ?"
+                sql = f"""
+                    SELECT c.item_id, c.corpus, c.reference, c.title,
+                           c.surface, c.lemma, c.morphology,
+                           p.greek, p.translation
+                    FROM concordance_forms c
+                    JOIN corpus p ON p.id = c.item_id AND p.corpus = c.corpus
+                    WHERE c.corpus = ?
+                      AND c.lemma_normalized IN ({placeholders})
+                    ORDER BY LENGTH(p.greek) ASC, c.item_id
+                    {limit_clause}
+                """
+                params = [corpus, *terms]
+                if limit is not None:
+                    params.append(max(500, limit * 100))
+                rows = con.execute(sql, params)
+                accepted = []
+                fingerprints = []
+                seen_ids = set()
+                for r in rows:
+                    item = dict(r)
+                    greek = item.get('greek') or ''
+                    form = item.get('surface') or ''
+                    if item['item_id'] in seen_ids:
+                        continue
+                    if _word_match(greek, form)[0] < 0:
+                        continue
+                    excerpt = context(greek, form)
+                    if not excerpt:
+                        continue
+                    signature = _signature(greek, form)
+                    if not signature:
+                        continue
+                    # Collapse parallel editions by their surrounding words.
+                    if any(_is_duplicate(signature, prev) for prev in fingerprints):
+                        continue
+                    fingerprints.append(signature)
+                    seen_ids.add(item['item_id'])
+                    item['excerpt'] = excerpt
+                    item.pop('greek', None)
+                    item['match_class'] = ('FUZZY SPELLING CANDIDATE' if suggestion
+                                           else _match_class(query, form))
+                    item['needs_lexical_review'] = suggestion or (
+                        normalized(query) == 'ερμησ'
+                        and normalized(form) == 'ερμην'
+                        and not form[:1].isupper()
+                    )
+                    if suggestion:
+                        item['suggested_lemma'] = item.get('lemma') or form
+                    accepted.append(item)
+                    if limit is not None and len(accepted) >= limit:
+                        break
+                if not suggestion:
+                    accepted.sort(key=lambda x: (
+                        x['needs_lexical_review'],
+                        x['match_class'] != 'EXACT',
+                        x.get('title') or '', x.get('reference') or ''
+                    ))
+                output.extend(accepted)
+            return output
+
+        exact = fetch(exact_terms)
+        if exact or not fuzzy:
+            return exact
+
+        alternatives = _fuzzy_candidates(con, requested, query)
+        # Choose one correction, then retrieve its attestations. Never pool
+        # unrelated near-spellings into one results set.
+        for candidate in alternatives:
+            if candidate in exact_terms:
+                continue
+            # For the known Hermes lemma, include its observed inflections.
+            forms = hermes_forms.get(candidate, (candidate,))
+            candidate_hits = fetch(forms, suggestion=True)
+            if candidate_hits:
+                for hit in candidate_hits:
+                    hit['suggested_correction'] = candidate
+                return candidate_hits
+        return []
+    finally:
+        con.close()
+
+
+def run(argv):
+    parser = argparse.ArgumentParser(
+        prog="nothos research",
+        description="LSJ and Temple primary-source research",
+    )
+
+    parser.add_argument("query")
+    parser.add_argument("--sources", required=True)
+    parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument("--all", action="store_true",
+                        help="Return all matching Temple passages per corpus")
+    parser.add_argument("--fuzzy", action="store_true",
+                        help="Suggest near-spellings only if exact search finds no passages")
+    parser.add_argument("--no-ai", action="store_true")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--output")
+    parser.add_argument("--banner", default="auto")
+    parser.add_argument("--full", action="store_true")
+
+    args = parser.parse_args(argv)
+
+    if args.top_k < 1:
+        parser.error("--top-k must be positive")
+
+    requested = [
+        s.strip().lower()
+        for s in args.sources.split(",")
+        if s.strip()
+    ]
+
+    valid = {"lsj", *SOURCE_MAP}
+
+    unknown = sorted(set(requested) - valid)
+
+    if unknown:
+        parser.error("Unknown sources: " + ", ".join(unknown))
+
+    sources = list(dict.fromkeys(requested))
+
+    try:
+        hits = search_temple(args.query, sources,
+                             None if args.all else args.top_k,
+                             fuzzy=args.fuzzy)
+    except (sqlite3.Error, OSError) as exc:
+        parser.exit(1, f"Temple database error: {exc}\n")
+
+    if args.format == "json":
+        payload = {
+            "query": args.query,
+            "sources": sources,
+            "temple_matches": hits,
+            "matching": "exact normalized lemma; optional fuzzy fallback",
+            "note": "MAGICAL is not exclusively PGM.",
+        }
+        output = json.dumps(payload, ensure_ascii=False, indent=2)
+
+    else:
+        use_color = (
+            sys.stdout.isatty()
+            and os.getenv("NO_COLOR") is None
+            and os.getenv("TERM") != "dumb"
+        )
+
+        def color(code, value):
+            if not use_color:
+                return value
+            return ESC + f"[{code}m" + value + ESC + "[0m"
+
+        lines = [
+            "",
+            color("1;35", "🏛️ NOTHOS — THE TEMPLE PRIMARY SOURCES"),
+            color("36", f"🔎 QUERY: {args.query}"),
+            color("90", "📚 Sources: " + ", ".join(sources)),
+            color("90", f"📜 Distinct matching passages: {len(hits)} (" + ("all matches" if args.all else f"up to {args.top_k} per corpus") + ")"),
+            "",
+        ]
+
+        previous_corpus = None
+        source_numbers = {}
+
+        for hit in hits:
+            source = hit["corpus"]
+
+            if source != previous_corpus:
+                headings = {
+                    "GALEN": "🏺 GALEN — GREEK MEDICAL COLLECTION",
+                    "GALEN_LATIN": "📚 GALEN — LATIN COLLECTION",
+                    "MAGICAL": "🔮 MAGICAL PAPYRI — DCLP COLLECTION",
+                    "LXX": "📜 SEPTUAGINT — LXX",
+                }
+
+                lines.extend([
+                    "",
+                    color("1;35", headings.get(source, source)),
+                    color("1;35", "━" * 65),
+                ])
+
+                previous_corpus = source
+
+            source_numbers[source] = source_numbers.get(source, 0) + 1
+            i = source_numbers[source]
+
+            if source == "MAGICAL":
+                source += " (DCLP/magical collection; PGM not assumed)"
+
+            lines.extend([
+                color("1;35", "═" * 65),
+                color("1;33", f"[{i}] {hit['title']}"),
+                color("36", f"📚 SOURCE: {source}"),
+                f"📍 REFERENCE: {hit['reference']}",
+                f"🇬🇷 MATCHED FORM: {hit['surface']}",
+                f"🏺 LEMMA: {hit['lemma']}",
+                color("1;32", f"🔬 MATCH: {hit['match_class']}"),
+                *(
+                    [color("1;33", "⚠️ LEXICAL IDENTITY REQUIRES REVIEW")]
+                    if hit["needs_lexical_review"] else []
+                ),
+                "📜 ORIGINAL TEXT:",
+                highlight(hit["excerpt"], hit["surface"], use_color),
+                "",
+            ])
+
+            if hit.get("translation"):
+                lines.extend([
+                    color("36", "🗣️ CORPUS-SUPPLIED TRANSLATION"),
+                    hit["translation"][:500],
+                    "",
+                ])
+
+        if not hits:
+            lines.extend([
+                color("1;33", "No exact normalized lemma matches found."),
+                "Try a related Greek lemma or another source.",
+                "",
+            ])
+
+        lines.extend([
+            color("1;35", "🛡️ EVIDENCE BOUNDARY"),
+            "Matches are attested concordance entries, not proof "
+            "of a proposed interpretation.",
+            "Confirm source attribution and Greek against critical editions.",
+            "",
+        ])
+
+        output = "\n".join(lines)
+
+    # Existing LSJ/FAISS route remains the authority for LSJ output.
+    if "lsj" in sources and args.format == "text" and not args.output:
+        executable = shutil.which("nothos")
+
+        if not executable:
+            parser.exit(1, "Cannot locate the existing nothos executable\n")
+
+        command = [
+            executable,
+            "research",
+            args.query,
+            "--engine", "lsj",
+            "--top-k", str(args.top_k),
+            "--banner", args.banner,
+        ]
+
+        if args.no_ai:
+            command.append("--no-ai")
+
+        print("🏛️ EXISTING LSJ / FAISS ENGINE", flush=True)
+        completed = subprocess.run(command, check=False)
+
+        if completed.returncode:
+            print(
+                f"⚠️ LSJ command exited with status {completed.returncode}",
+                file=sys.stderr,
+            )
+
+    if args.output:
+        path = Path(args.output).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(output + "\n", encoding="utf-8")
+        print(f"Saved: {path}")
+    else:
+        print(output)
+
+    return 0

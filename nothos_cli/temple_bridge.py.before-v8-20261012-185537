@@ -1,0 +1,472 @@
+
+"""Read-only bridge between NOTHOS and The Temple."""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
+
+DB = Path.home() / "backups/the-temple/temple-complete.sqlite3"
+
+SOURCE_MAP = {
+    "galen": "GALEN",
+    "galen_latin": "GALEN_LATIN",
+    "lxx": "LXX",
+    "pgm": "MAGICAL",
+    "magical": "MAGICAL",
+}
+
+ESC = chr(27)
+
+
+def normalized(value):
+    value = unicodedata.normalize("NFD", str(value).casefold())
+    value = "".join(
+        ch for ch in value
+        if unicodedata.category(ch) != "Mn"
+    )
+    return value.replace("ς", "σ")
+
+
+def locate(text, word):
+    """Find Greek text with or without accents; retain original offsets."""
+    if not text or not word:
+        return -1, -1
+
+    chars = []
+    positions = []
+
+    for i, ch in enumerate(text):
+        for c in normalized(ch):
+            chars.append(c)
+            positions.append(i)
+
+    needle = normalized(word)
+    index = "".join(chars).find(needle)
+
+    if index < 0:
+        return -1, -1
+
+    return positions[index], positions[index + len(needle) - 1] + 1
+
+
+def highlight(text, word, enabled=True):
+    if not enabled:
+        return text
+
+    start, end = locate(text, word)
+    if start < 0:
+        return text
+
+    return (
+        text[:start]
+        + ESC + "[1;33m"
+        + text[start:end]
+        + ESC + "[0m"
+        + text[end:]
+    )
+
+
+def context(text, word, before=180, after=320):
+    start, end = locate(text, word)
+
+    if start < 0:
+        return text[:500]
+
+    return text[max(0, start-before):min(len(text), end+after)]
+
+
+
+def _word_match(text, word):
+    """Return a real Greek word match, not a substring of another word."""
+    if not text or not word:
+        return -1, -1
+
+    offset = 0
+
+    while offset < len(text):
+        start, end = locate(text[offset:], word)
+
+        if start < 0:
+            return -1, -1
+
+        start += offset
+        end += offset
+
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+
+        if not (
+            (before and unicodedata.category(before).startswith("L"))
+            or (after and unicodedata.category(after).startswith("L"))
+        ):
+            return start, end
+
+        offset = end
+
+
+def context(text, word, before=180, after=320):
+    start, end = _word_match(text, word)
+
+    if start < 0:
+        return ""
+
+    return text[max(0, start-before):min(len(text), end+after)]
+
+
+def highlight(text, word, enabled=True):
+    if not enabled:
+        return text
+
+    start, end = _word_match(text, word)
+
+    if start < 0:
+        return text
+
+    return (
+        text[:start]
+        + ESC + "[1;33m"
+        + text[start:end]
+        + ESC + "[0m"
+        + text[end:]
+    )
+
+
+def search_temple(query, sources, limit):
+    """Balanced retrieval with distinct results from each requested corpus."""
+
+    requested = []
+
+    for source in sources:
+        corpus = SOURCE_MAP.get(source)
+
+        if corpus and corpus not in requested:
+            requested.append(corpus)
+
+    if not requested:
+        return []
+
+    if not DB.is_file():
+        raise FileNotFoundError(DB)
+
+    terms = [
+        normalized(word)
+        for word in query.split()
+        if word.strip()
+    ]
+
+    # Corpus-observed inflections of Hermes.
+    hermes = {
+        "ερμησ": ("ερμησ", "ερμη", "ερμην", "ερμου"),
+    }
+
+    expanded = []
+
+    for term in terms:
+        expanded.extend(hermes.get(term, (term,)))
+
+    terms = list(dict.fromkeys(expanded))
+
+    if not terms:
+        return []
+
+    con = sqlite3.connect(
+        f"file:{DB.resolve()}?mode=ro",
+        uri=True,
+        timeout=30,
+    )
+
+    con.row_factory = sqlite3.Row
+
+    all_results = []
+
+    try:
+        con.execute("PRAGMA query_only=ON")
+
+        marks = ",".join("?" for _ in terms)
+
+        for corpus in requested:
+
+            sql = f"""
+                SELECT
+                    c.item_id,
+                    c.corpus,
+                    c.reference,
+                    c.title,
+                    c.surface,
+                    c.lemma,
+                    c.morphology,
+                    p.greek,
+                    p.translation
+                FROM concordance_forms c
+                JOIN corpus p
+                  ON p.id = c.item_id
+                 AND p.corpus = c.corpus
+                WHERE c.corpus = ?
+                  AND c.lemma_normalized IN ({marks})
+                ORDER BY LENGTH(p.greek) ASC, c.item_id
+                LIMIT ?
+            """
+
+            rows = con.execute(
+                sql,
+                [corpus, *terms, max(500, limit * 100)]
+            )
+
+            selected = []
+            seen_items = set()
+            seen_contexts = []
+
+            for row in rows:
+
+                item = dict(row)
+                greek = item.get("greek") or ""
+                surface = item.get("surface") or ""
+
+                # Require a verified standalone surface occurrence.
+                if _word_match(greek, surface)[0] < 0:
+                    continue
+
+                if item["item_id"] in seen_items:
+                    continue
+
+                excerpt = context(greek, surface)
+
+                if not excerpt:
+                    continue
+
+                canonical = " ".join(
+                    normalized(excerpt).split()
+                )
+
+                if not canonical:
+                    continue
+
+                # Compare immediate context around the actual match.
+                pos, finish = _word_match(canonical, normalized(surface))
+
+                if pos < 0:
+                    signature = canonical[:160]
+                else:
+                    signature = canonical[
+                        max(0, pos-65):min(len(canonical), finish+65)
+                    ]
+
+                # Overlapping records frequently contain the same
+                # passage under several CTS references.
+                duplicate = False
+
+                for previous in seen_contexts:
+                    if (
+                        signature == previous
+                        or (
+                            len(signature) >= 45
+                            and signature in previous
+                        )
+                        or (
+                            len(previous) >= 45
+                            and previous in signature
+                        )
+                    ):
+                        duplicate = True
+                        break
+
+                if duplicate:
+                    continue
+
+                seen_items.add(item["item_id"])
+                seen_contexts.append(signature)
+
+                item["excerpt"] = excerpt
+                item.pop("greek", None)
+
+                selected.append(item)
+
+                if len(selected) >= limit:
+                    break
+
+            all_results.extend(selected)
+
+        return all_results
+
+    finally:
+        con.close()
+
+def run(argv):
+    parser = argparse.ArgumentParser(
+        prog="nothos research",
+        description="LSJ and Temple primary-source research",
+    )
+
+    parser.add_argument("query")
+    parser.add_argument("--sources", required=True)
+    parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument("--no-ai", action="store_true")
+    parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--output")
+    parser.add_argument("--banner", default="auto")
+    parser.add_argument("--full", action="store_true")
+
+    args = parser.parse_args(argv)
+
+    if args.top_k < 1:
+        parser.error("--top-k must be positive")
+
+    requested = [
+        s.strip().lower()
+        for s in args.sources.split(",")
+        if s.strip()
+    ]
+
+    valid = {"lsj", *SOURCE_MAP}
+
+    unknown = sorted(set(requested) - valid)
+
+    if unknown:
+        parser.error("Unknown sources: " + ", ".join(unknown))
+
+    sources = list(dict.fromkeys(requested))
+
+    try:
+        hits = search_temple(args.query, sources, args.top_k)
+    except (sqlite3.Error, OSError) as exc:
+        parser.exit(1, f"Temple database error: {exc}\n")
+
+    if args.format == "json":
+        payload = {
+            "query": args.query,
+            "sources": sources,
+            "temple_matches": hits,
+            "matching": "exact normalized lemma",
+            "note": "MAGICAL is not exclusively PGM.",
+        }
+        output = json.dumps(payload, ensure_ascii=False, indent=2)
+
+    else:
+        use_color = (
+            sys.stdout.isatty()
+            and os.getenv("NO_COLOR") is None
+            and os.getenv("TERM") != "dumb"
+        )
+
+        def color(code, value):
+            if not use_color:
+                return value
+            return ESC + f"[{code}m" + value + ESC + "[0m"
+
+        lines = [
+            "",
+            color("1;35", "🏛️ NOTHOS — THE TEMPLE PRIMARY SOURCES"),
+            color("36", f"🔎 QUERY: {args.query}"),
+            color("90", "📚 Sources: " + ", ".join(sources)),
+            color("90", f"📜 Distinct matching passages: {len(hits)} (up to {args.top_k} per corpus)"),
+            "",
+        ]
+
+        previous_corpus = None
+        source_numbers = {}
+
+        for hit in hits:
+            source = hit["corpus"]
+
+            if source != previous_corpus:
+                headings = {
+                    "GALEN": "🏺 GALEN — GREEK MEDICAL COLLECTION",
+                    "GALEN_LATIN": "📚 GALEN — LATIN COLLECTION",
+                    "MAGICAL": "🔮 MAGICAL PAPYRI — DCLP COLLECTION",
+                    "LXX": "📜 SEPTUAGINT — LXX",
+                }
+
+                lines.extend([
+                    "",
+                    color("1;35", headings.get(source, source)),
+                    color("1;35", "━" * 65),
+                ])
+
+                previous_corpus = source
+
+            source_numbers[source] = source_numbers.get(source, 0) + 1
+            i = source_numbers[source]
+
+            if source == "MAGICAL":
+                source += " (DCLP/magical collection; PGM not assumed)"
+
+            lines.extend([
+                color("1;35", "═" * 65),
+                color("1;33", f"[{i}] {hit['title']}"),
+                color("36", f"📚 SOURCE: {source}"),
+                f"📍 REFERENCE: {hit['reference']}",
+                f"🇬🇷 MATCHED FORM: {hit['surface']}",
+                f"🏺 LEMMA: {hit['lemma']}",
+                "📜 ORIGINAL TEXT:",
+                highlight(hit["excerpt"], hit["surface"], use_color),
+                "",
+            ])
+
+            if hit.get("translation"):
+                lines.extend([
+                    color("36", "🗣️ CORPUS-SUPPLIED TRANSLATION"),
+                    hit["translation"][:500],
+                    "",
+                ])
+
+        if not hits:
+            lines.extend([
+                color("1;33", "No exact normalized lemma matches found."),
+                "Try a related Greek lemma or another source.",
+                "",
+            ])
+
+        lines.extend([
+            color("1;35", "🛡️ EVIDENCE BOUNDARY"),
+            "Matches are attested concordance entries, not proof "
+            "of a proposed interpretation.",
+            "Confirm source attribution and Greek against critical editions.",
+            "",
+        ])
+
+        output = "\n".join(lines)
+
+    # Existing LSJ/FAISS route remains the authority for LSJ output.
+    if "lsj" in sources and args.format == "text" and not args.output:
+        executable = shutil.which("nothos")
+
+        if not executable:
+            parser.exit(1, "Cannot locate the existing nothos executable\n")
+
+        command = [
+            executable,
+            "research",
+            args.query,
+            "--engine", "lsj",
+            "--top-k", str(args.top_k),
+            "--banner", args.banner,
+        ]
+
+        if args.no_ai:
+            command.append("--no-ai")
+
+        print("🏛️ EXISTING LSJ / FAISS ENGINE", flush=True)
+        completed = subprocess.run(command, check=False)
+
+        if completed.returncode:
+            print(
+                f"⚠️ LSJ command exited with status {completed.returncode}",
+                file=sys.stderr,
+            )
+
+    if args.output:
+        path = Path(args.output).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(output + "\n", encoding="utf-8")
+        print(f"Saved: {path}")
+    else:
+        print(output)
+
+    return 0

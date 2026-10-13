@@ -426,7 +426,10 @@ def retrieve(query, top_k=8):
 
     if len(combined) < top_k:
         try:
-            semantic = retrieve_semantic(query, top_k=top_k)
+            # NOTHOS_V18_OFFLINE_ROUTING: embeddings are opt-in for LSJ lookup.
+            semantic = (retrieve_semantic(query, top_k=top_k)
+                        if __import__('os').environ.get('NOTHOS_ENABLE_SEMANTIC') == '1'
+                        else [])
         except (requests.RequestException, KeyError, ValueError):
             if not combined:
                 raise
@@ -1074,13 +1077,7 @@ def explain(query, top_k=8, show_sources=True):
     from requests import RequestException
     exact = retrieve_exact(query, top_k=min(top_k, 4))
     if not exact:
-        print('No exact LSJ headword. Trying existing research pipeline...')
-        try:
-            return _nothos_legacy_explain(query, top_k=top_k, show_sources=show_sources)
-        except RequestException as exc:
-            print('⚠️ Semantic embedding unavailable; cannot research free-text query.')
-            print(f'   {exc}')
-            return
+        return _nothos_offline_lexical_fallback(query, top_k=top_k)
 
     entry = exact[0]
     print(f'\n{YELLOW}🏛️ NOTHOS — LSJ LEXICON + FAISS{RESET}')
@@ -1117,6 +1114,100 @@ def explain(query, top_k=8, show_sources=True):
     else:
         print('\n⚡ No Ollama generation (enable with NOTHOS_AI=1).')
     print(f'\n{YELLOW}🛡️ LSJ is cited as [1]; AI claim entailment has NOT been verified.{RESET}')
+
+
+# NOTHOS_V17_7_OFFLINE_LEXICAL_FALLBACK
+def _nothos_offline_lexical_fallback(query, top_k=8):
+    # NOTHOS_V17_9_RESEARCH_RESTORE: explicit TTY palette for the new fallback.
+    import os as _c_os
+    import sys as _c_sys
+    _tty = (_c_sys.stdout.isatty() and not _c_os.environ.get('NO_COLOR')
+            and _c_os.environ.get('TERM') != 'dumb')
+    MAGENTA = "\033[1;35m" if _tty else ""
+    YELLOW = "\033[1;33m" if _tty else ""
+    CYAN = "\033[1;36m" if _tty else ""
+    GREEN = "\033[1;32m" if _tty else ""
+    RESET = "\033[0m" if _tty else ""
+
+    # NOTHOS_V17_8_RESTORE_COLORS
+    """Read-only lexical similarity search. No model or embeddings required."""
+    import sqlite3
+    import unicodedata
+
+    def normalize(text):
+        text = unicodedata.normalize("NFD", text).casefold()
+        return "".join(
+            c for c in text
+            if unicodedata.category(c) != "Mn"
+        ).replace("ς", "σ").strip()
+
+    needle = normalize(query)
+
+    if len(needle) < 3:
+        print("⚠ Query too short for prefix search.")
+        return
+
+    candidates = []
+
+    con = sqlite3.connect(
+        f"file:{LEXICON_DB.resolve()}?mode=ro",
+        uri=True,
+        timeout=30,
+    )
+
+    try:
+        rows = con.execute(
+            """
+            SELECT greek_lemma, definition
+            FROM entries
+            WHERE greek_lemma IS NOT NULL
+              AND greek_lemma != ''
+            """
+        )
+
+        for lemma, definition in rows:
+            normalized = normalize(lemma)
+
+            common = 0
+            for a, b in zip(needle, normalized):
+                if a != b:
+                    break
+                common += 1
+
+            if common < 3:
+                continue
+
+            # Prefer closer spelling and longer common prefixes.
+            score = (
+                common * 10
+                - abs(len(needle) - len(normalized))
+            )
+
+            candidates.append((score, lemma, definition or ""))
+
+    finally:
+        con.close()
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+
+    print(f"\n{MAGENTA}🏛️ NOTHOS — OFFLINE LSJ LEXICAL SEARCH{RESET}")
+    print(f"{CYAN}🇬🇷 QUERY:{RESET} {YELLOW}{query}{RESET}")
+    print(MAGENTA + "━" * 60 + RESET)
+
+    if not candidates:
+        print("No related LSJ headwords found.")
+        return
+
+    print(f"{MAGENTA}📖 SHARED-PREFIX CANDIDATES{RESET}")
+    print(f"{YELLOW}⚠ Spelling similarity does not establish etymology.{RESET}\n")
+
+    for _, lemma, definition in candidates[:top_k]:
+        cleaned = " ".join(
+            clean_definition(definition).split()
+        )
+        print(f"{YELLOW}🇬🇷 {lemma}{RESET}")
+        print(f"   {GREEN}📚 {cleaned[:280]}{RESET}")
+        print(MAGENTA + "─" * 60 + RESET)
 
 
 if __name__ == "__main__":

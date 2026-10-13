@@ -11,6 +11,23 @@ from .terminal import show_banner
 
 def main():
     # NOTHOS_V15_ETYMOLOGY_DISPATCH
+    # NOTHOS_V18_OFFLINE_ROUTING: route related concordance before main argparse.
+    # Regular research, etymology, and source-free LSJ commands are unchanged.
+    # NOTHOS_V18_2_NATIVE_TEMPLE_RENDER
+    # Related-word research must use Temple's native terminal renderer.
+    # Do not send it through engine.run_research -> generic render().
+    import sys as _v182_sys
+    if (len(_v182_sys.argv) >= 3
+            and _v182_sys.argv[1] == 'research'
+            and '--related' in _v182_sys.argv[2:]):
+        from .temple_bridge import run as _v182_temple_run
+        return _v182_temple_run(_v182_sys.argv[2:])
+    import sys as _n18_sys
+    if (len(_n18_sys.argv) > 2
+            and _n18_sys.argv[1] == 'research'
+            and '--related' in _n18_sys.argv[2:]):
+        from .temple_bridge import run as _n18_temple_run
+        return _n18_temple_run(_n18_sys.argv[2:])
     import sys as _v15_sys
     if len(_v15_sys.argv) > 1 and _v15_sys.argv[1] in ("etymology", "morphology", "roots"):
         from .etymology import main as _v15_etymology_main
@@ -92,6 +109,13 @@ def main():
         "--style",
         choices=("auto", "full", "compact", "ascii", "none"),
         default="auto",
+    )
+
+    # NOTHOS_V17_6_ETYMOLOGY_HELP
+    sub.add_parser(
+        "etymology",
+        help="Analyze Greek roots, morphology, variants, and LSJ evidence",
+        add_help=False,
     )
 
     sub.add_parser("doctor", help="Diagnose the NOTHOS installation")
@@ -179,13 +203,47 @@ def main():
                         else:
                             print(render_compact(data))
                     else:
-                        print(render(data, args.format))
+                        print(_nothos_v181_color_report(render(data, args.format)))
                 else:
                     print(render(data, args.format))
 
         except (ValueError, RuntimeError) as exc:
             parser.exit(1, f"NOTHOS error: {exc}\n")
 
+
+
+
+# NOTHOS_V18_1_PRESENTATION — terminal-only format; no color in file exports.
+def _nothos_v181_color_report(report):
+    import os, sys, re
+    if (not sys.stdout.isatty() or os.environ.get('NO_COLOR') is not None
+            or os.environ.get('TERM') == 'dumb'):
+        return report
+    gold='\033[1;33m'; purple='\033[1;35m'; cyan='\033[1;36m'
+    green='\033[1;32m'; reset='\033[0m'
+    # Preserve any existing ANSI sequences rather than double-coloring a report.
+    if '\033[' in report:
+        return report
+    out=[]
+    for line in report.splitlines(keepends=True):
+        lead=line.lstrip()
+        if lead.startswith(('🏛️', '🔎 RELATED-WORD OCCURRENCE', '📖 SHARED-PREFIX', '🧠')):
+            out.append(purple+line.rstrip('\n')+reset+('\n' if line.endswith('\n') else ''))
+        elif lead.startswith(('🔎 QUERY:', '📍 REFERENCE:', '📚 SOURCE:', '📚 Sources:')):
+            out.append(cyan+line.rstrip('\n')+reset+('\n' if line.endswith('\n') else ''))
+        elif lead.startswith(('⚠', '🛡️')):
+            out.append(gold+line.rstrip('\n')+reset+('\n' if line.endswith('\n') else ''))
+        elif lead.startswith(('📚 LSJ', '   📚')):
+            out.append(green+line.rstrip('\n')+reset+('\n' if line.endswith('\n') else ''))
+        elif lead.startswith(('🇬🇷', '🏺 LEMMA:')):
+            out.append(gold+line.rstrip('\n')+reset+('\n' if line.endswith('\n') else ''))
+        elif lead.startswith(('━','═','─')):
+            out.append(purple+line.rstrip('\n')+reset+('\n' if line.endswith('\n') else ''))
+        else:
+            # Highlight Greek tokens within passage lines, without modifying text content.
+            out.append(re.sub(r'[\u0370-\u03ff\u1f00-\u1fff]+(?:[\u0370-\u03ff\u1f00-\u1fff\u0300-\u036f]*)',
+                              lambda m: gold+m.group()+reset, line))
+    return ''.join(out)
 
 if __name__ == "__main__":
     main()

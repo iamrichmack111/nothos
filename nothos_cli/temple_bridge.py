@@ -413,6 +413,8 @@ def run(argv):
                         help="Override NOTHOS_AI_MODEL for this research command")
     parser.add_argument("--all", action="store_true",
                         help="Return all matching Temple passages per corpus")
+    parser.add_argument("--related", action="store_true",
+                        help="Also search related LSJ spellings in selected sources (non-etymological)")
     parser.add_argument("--fuzzy", action="store_true",
                         help="Suggest near-spellings only if exact search finds no passages")
     parser.add_argument("--no-ai", action="store_true")
@@ -450,8 +452,25 @@ def run(argv):
         hits = search_temple(args.query, sources,
                              None if args.all else args.top_k,
                              fuzzy=args.fuzzy)
+        # NOTHOS_V17_9_RESEARCH_RESTORE: optional related-word concordance.
+        # Default keeps original behavior; enable with --related.
+        if args.related:
+            from .lexical_fallback import related_lsj_headwords
+            candidates = related_lsj_headwords(args.query, max_results=6)
+            seen = {(h.get('corpus'), h.get('reference'), h.get('text')) for h in hits}
+            for word in candidates:
+                extra_hits = search_temple(word, sources,
+                    None if args.all else args.top_k, fuzzy=False)
+                for hit in extra_hits:
+                    key = (hit.get('corpus'), hit.get('reference'), hit.get('text'))
+                    if key not in seen:
+                        seen.add(key)
+                        tagged = dict(hit)
+                        tagged['_nothos_related_term'] = word
+                        hits.append(tagged)
         # NOTHOS_V14_SINGLE_WRITER: synthesize after all evidence is printed.
-        synthesize = not args.no_ai and args.format == "text"
+        synthesize = not args.no_ai and args.format == "text" and not args.related
+        # AI is intentionally skipped for --related, to avoid attributing neighbors to the queried name.
         _nothos_snapshot = [dict(x) for x in hits] if synthesize else []
     except (sqlite3.Error, OSError) as exc:
         parser.exit(1, f"Temple database error: {exc}\n")
@@ -487,10 +506,36 @@ def run(argv):
             "",
         ]
 
+        # NOTHOS_V18_1_PRESENTATION: show attested dictionary definitions before concordance.
+        if args.related and 'lsj' in sources:
+            import sqlite3 as _v181_sqlite3
+            from .lexical_fallback import related_lsj_headwords as _v181_related
+            import sys as _v181_sys
+            from pathlib import Path as _v181_Path
+            _v181_root = _v181_Path(__file__).resolve().parents[1]
+            _v181_sys.path.insert(0, str(_v181_root / 'tools'))
+            from lsj_rag import LEXICON_DB as _v181_db
+            _v181_words = _v181_related(args.query, max_results=6)
+            lines.extend(['', color('1;35', '📖 LSJ — RELATED HEADWORDS (NOT PROVEN ETYMOLOGIES)'),
+                          color('1;35', '━' * 65)])
+            with _v181_sqlite3.connect('file:' + str(_v181_db.resolve()) + '?mode=ro', uri=True) as _v181_con:
+                for _v181_word in _v181_words:
+                    _v181_row = _v181_con.execute(
+                        'SELECT definition FROM entries WHERE greek_lemma=? LIMIT 1', (_v181_word,)).fetchone()
+                    if _v181_row:
+                        _v181_def = ' '.join((_v181_row[0] or '').split())
+                        lines.append(color('1;33', '🇬🇷 ' + _v181_word))
+                        lines.append(color('1;32', '   📚 ' + _v181_def[:280]))
+            if not _v181_words:
+                lines.append('No related LSJ headwords found.')
+            lines.append(color('1;33', '⚠ Shared spelling does not prove a historical root.'))
+
         previous_corpus = None
         source_numbers = {}
 
         for hit in hits:
+            if hit.get('_nothos_related_term'):
+                lines.append(color('1;35', '\n🔎 RELATED-WORD OCCURRENCE — ' + hit['_nothos_related_term'] + ' (not the original name)'))
             source = hit["corpus"]
 
             if source != previous_corpus:
