@@ -10,6 +10,11 @@ from .terminal import show_banner
 
 
 def main():
+    # NOTHOS_V15_ETYMOLOGY_DISPATCH
+    import sys as _v15_sys
+    if len(_v15_sys.argv) > 1 and _v15_sys.argv[1] in ("etymology", "morphology", "roots"):
+        from .etymology import main as _v15_etymology_main
+        return _v15_etymology_main(_v15_sys.argv[2:])
     # NOTHOS_TEMPLE_BRIDGE_V1
     import sys as _temple_sys
     _temple_argv = _temple_sys.argv[1:]
