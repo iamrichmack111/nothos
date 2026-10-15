@@ -1,0 +1,101 @@
+.TH NOTHOS 1 "October 2026" "Nothos V18.3" "User Commands"
+.SH NAME
+nothos \- Ancient Greek philology, lexicons, and primary-source research
+.SH SYNOPSIS
+.B nothos research
+.RI "\"" query "\""
+.RB [ --sources " " lsj,galen,pgm,lxx ]
+.RB [ --related ]
+.RB [ --all ]
+.RB [ --top-k " " N ]
+.RB [ --no-ai ]
+.RB [ --model " " MODEL ]
+.RB [ --output " " PATH ]
+.br
+.B nothos etymology
+.RI "\"" word "\""
+.RB [ --variants ]
+.RB [ --ai ]
+.RB [ --model " " MODEL ]
+.SH DESCRIPTION
+Nothos combines local LSJ lexical evidence, optional FAISS related-headword
+retrieval, and Greek primary texts including locally indexed Galen, Greek
+magical papyri, and the Septuagint (LXX). Optional Ollama analysis is generated
+commentary and must be checked against the original Greek.
+.PP
+Available options and commands depend on the version installed locally.
+.SH WORDS TO SEARCH
+.TP
+.B λίβανος (libanos)
+Frankincense, the aromatic resin. Search as written and review related forms.
+.TP
+.B λιβανωτός (libanotos)
+A distinct incense/frankincense term worth searching separately.
+.TP
+.B σμύρνα (smyrna)
+Myrrh, the aromatic resin. This may also overlap spelling used for Smyrna,
+the city; verify context in each passage.
+.TP
+.B σμύρνη (smyrne)
+Alternative Greek spelling to examine independently; verify corpus entries.
+.SH EXAMPLES
+.SS Evidence-only frankincense across primary sources
+.nf
+nothos research "λίβανος" --sources lsj,galen,pgm,lxx --all --no-ai
+.fi
+.SS Evidence-only myrrh across primary sources
+.nf
+nothos research "σμύρνα" --sources lsj,galen,pgm,lxx --all --no-ai
+.fi
+.SS Related LSJ candidate spellings (not proven etymologies)
+.nf
+nothos research "λίβανος" --sources lsj,galen,pgm,lxx --related --top-k 10 --no-ai
+nothos research "σμύρνα" --sources lsj,galen,pgm,lxx --related --all --no-ai
+.fi
+.SS Search incense-related word forms independently
+.nf
+nothos research "λιβανωτός" --sources lsj,galen,pgm,lxx --all --no-ai
+nothos research "σμύρνη" --sources lsj,galen,pgm,lxx --all --no-ai
+.fi
+.SS Compare frankincense and myrrh with local Ollama
+.nf
+nothos research "λίβανος" --sources lsj,galen,pgm,lxx --top-k 8 --model gemma3:4b
+nothos research "σμύρνα" --sources lsj,galen,pgm,lxx --top-k 8 --model gemma3:4b
+.fi
+.SS Etymology workflow, when available
+.nf
+nothos etymology "λίβανος" --variants --ai --model gemma3:4b --color always
+.fi
+.SH OPTIONS
+.TP
+.B --sources lsj,galen,pgm,lxx
+Select indexed collections. Availability depends on your local installation.
+.TP
+.B --related
+Look for related LSJ spellings in selected sources; not historical proof.
+.TP
+.B --all
+Return all matching Temple passages; may produce extensive output.
+.TP
+.B --top-k N
+Limit retrieved results when not using --all.
+.TP
+.B --no-ai
+Skip generated analysis and show retrieval evidence.
+.TP
+.B --model MODEL
+Select an available Ollama model for AI synthesis.
+.TP
+.B --output PATH
+Write a report to a UTF-8 file when supported.
+.SH NOTES
+The labels LSJ, Galen, PGM, and LXX describe separate sources. A zero-result
+search does not establish that a word is unattested in all ancient literature.
+Greek accents, inflected forms, corpus editions, and OCR may affect matching.
+LSJ headword similarity is not proof of common derivation.
+.SH FILES
+.I ~/.local/share/man/man1/nothos.1.gz
+User-local manual page installed by Nothos documentation patch.
+.SH SEE ALSO
+.BR man (1),
+.BR grep (1)

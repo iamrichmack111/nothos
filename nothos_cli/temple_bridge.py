@@ -403,6 +403,10 @@ def run(argv):
         prog="nothos research",
         description="LSJ and Temple primary-source research",
     )
+    # NOTHOS_V18_3_HELP_MAN
+    import argparse as _nothos_help_argparse
+    parser.formatter_class = _nothos_help_argparse.RawDescriptionHelpFormatter
+    parser.epilog = 'EXAMPLES (shell; keep Greek text in quotes):\n  nothos research "λίβανος" --sources lsj,galen,pgm,lxx --all --no-ai\n      Find frankincense (libanos) references across installed sources.\n  nothos research "σμύρνα" --sources lsj,galen,pgm,lxx --all --no-ai\n      Find myrrh (smyrna), the resin; not the city-name search.\n  nothos research "λίβανος" --sources lsj,galen,pgm,lxx --related --top-k 10 --no-ai\n      Include related LSJ spellings; not proof of shared etymology.\n  nothos research "σμύρνα" --sources lsj,galen,pgm,lxx --all --model gemma3:4b\n      Ask Ollama to analyze retrieved passages; verify against Greek.\n  nothos research "λιβανωτός" --sources lsj,galen,pgm,lxx --all --no-ai\n      Check a distinct frankincense/incense term.\n  nothos etymology "σμύρνα" --variants --ai --model gemma3:4b --color always\n      Optional etymology workflow, if installed in your Nothos version.\n  man nothos\n      Read the Nothos manual (or: man -l ~/.local/share/man/man1/nothos.1.gz).\nNOTES:\n  --sources requires an installed corpus; results reflect local coverage.\n  --related finds spelling/lexical candidates, not guaranteed cognates.\n  Use --no-ai for evidence-only searches and --all for all matched passages.\n'
 
     parser.add_argument("query")
     parser.add_argument("--sources", required=True)
